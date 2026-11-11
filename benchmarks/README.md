@@ -1,0 +1,7 @@
+# Harmes benchmark integration
+
+All benchmark infrastructure stays outside Harmes core. The immutable baseline is Harmes commit `f42f579cf8bac4918ac9599bece71618afadd846`, provider `openai-codex`, model `gpt-6-luna`, Harmes-owned OAuth; no OpenAI API key.
+
+The LongCoT-Mini, GAIA, and OOLONG Yahoo adapters are under `adapters/`. Harmes execution requires an explicit `--execute`; the OOLONG Yahoo adapter also supports `--stage-only`, which stages a pinned prompt without invoking Harmes or a scorer. The adapters invoke a fresh Harmes CLI process with `--format stream-json --provider openai-codex --model gpt-6-luna` and preserve raw traces. No benchmark task has been run.
+
+Docker Desktop/WSL2 are operational again (Engine 29.8.2; `hello-world` container succeeded), and the Terminal-Bench Lite base image was built. GAIA's exact dataset and scorer source are pinned and its single-task adapter is prepared. OOLONG Yahoo's exact pinned 32K test row is staged, and its adapter uses the pinned official evaluator. The official Aider image build is still pending: C: currently has about 9.47 GiB free, and the prior apt package writes failed with I/O errors when storage was exhausted. Do not retry that large image build until Docker storage has adequate headroom. Terminal-Bench Lite and Aider still need a verified adapter that runs original Harmes while containing file/terminal operations in the benchmark environment. OOLONG-Pairs still lacks the canonical scorer source. See [smoke-report.md](smoke-report.md) for exact pins, commands, and blockers.
