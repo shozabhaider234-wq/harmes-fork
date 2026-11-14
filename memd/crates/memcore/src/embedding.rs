@@ -788,13 +788,26 @@ mod tests {
     }
 
     #[cfg(feature = "local-fastembed")]
+    fn resolve_test_minilm_dir() -> std::path::PathBuf {
+        if let Some(dir) = std::env::var_os("MEMD_MODEL_DIR").filter(|dir| !dir.is_empty()) {
+            return std::path::PathBuf::from(dir);
+        }
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/all-MiniLM-L6-v2")
+    }
+
+    #[cfg(feature = "local-fastembed")]
     #[test]
-    #[ignore = "requires local MiniLM model files in /home/hammad/code/rust/models/all-MiniLM-L6-v2"]
+    #[ignore = "requires local MiniLM model files (run ./memd/scripts/fetch_models.sh or set MEMD_MODEL_DIR)"]
     fn fastembed_offline_minilm_ranks_semantically_related_memories() {
-        let model_dir = Path::new("/home/hammad/code/rust/models/all-MiniLM-L6-v2");
+        let model_dir = resolve_test_minilm_dir();
         let backend =
-            FastEmbedBackend::load_from_dir(model_dir, LocalModelConfig::all_minilm_l6_v2())
-                .unwrap();
+            FastEmbedBackend::load_from_dir(&model_dir, LocalModelConfig::all_minilm_l6_v2())
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "failed to load MiniLM from {}: {err}. Run ./memd/scripts/fetch_models.sh (or set MEMD_MODEL_DIR).",
+                        model_dir.display()
+                    )
+                });
 
         let m_cpu = EmbeddedMemory::new(
             "Efficient cache locality and avoiding false sharing between CPU threads maximizes throughput.",

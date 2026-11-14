@@ -1,4 +1,5 @@
 /target/
+/models/
 __pycache__/
 PLAN.md
 local-only
