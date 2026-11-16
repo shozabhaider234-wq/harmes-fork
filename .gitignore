@@ -88,6 +88,17 @@ environments/benchmarks/evals/
 # Web UI build output
 hermes_cli/web_dist/
 # Cross-process web UI build lock (flock target, always empty)
+
+# Workspace-local Rust toolchain used for memd testing
+/memd/.cargo-test/
+/memd/.rustup-test/
+/memd/msys2/
+/memd/target-gnu/
+/memd/.tmp-build/
+/memd/onnxruntime/
+/memd/onnxruntime-win-x64-*.zip
+/memd/gendef.pkg.tar.zst
+/memd/benchmark-results/
 .web_ui_build.lock
 apps/desktop/build/
 apps/desktop/dist/

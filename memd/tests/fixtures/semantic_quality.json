@@ -1,0 +1,26 @@
+{
+  "description": "Small hand-labeled local smoke set; not representative production-quality certification.",
+  "memories": [
+    {"id":"preference", "content":"The user prefers short, concise answers rather than lengthy explanations.", "kind":"semantic"},
+    {"id":"vegetarian", "content":"The user follows a vegetarian diet and avoids meat in meals.", "kind":"semantic"},
+    {"id":"compiler", "content":"A Rust build failed because the MSVC linker was absent. Switching to a GNU toolchain fixed the compilation.", "kind":"episodic"},
+    {"id":"database", "content":"The project stores extracted knowledge in SQLite with sqlite-vec for vector similarity.", "kind":"semantic"},
+    {"id":"transcripts", "content":"Keep original Hermes conversation history in its existing storage; memories hold source references only.", "kind":"semantic"},
+    {"id":"timeout", "content":"The HTTP request timed out. Adding a bounded retry with exponential backoff resolved the transient network failure.", "kind":"episodic"},
+    {"id":"scope", "content":"A multi-profile bug leaked preferences between accounts. Binding the active profile scope prevented cross-user memory access.", "kind":"episodic"},
+    {"id":"garden", "content":"Tomato plants grow best with regular watering and several hours of direct sunshine.", "kind":"semantic"},
+    {"id":"tests", "content":"Use deterministic fixtures and temporary databases to test persistence across service restarts.", "kind":"semantic"},
+    {"id":"old_preference", "content":"Previously the user wanted detailed, lengthy explanations. That preference is now obsolete.", "kind":"semantic", "tags":["historical"]}
+  ],
+  "queries": [
+    {"query":"How verbose should my replies be?", "relevant":["preference"]},
+    {"query":"What food restrictions should dinner respect?", "relevant":["vegetarian"]},
+    {"query":"How did we fix the missing linker during compilation?", "relevant":["compiler"]},
+    {"query":"Which persistent database handles semantic vector lookup?", "relevant":["database"]},
+    {"query":"Where should the original chats remain?", "relevant":["transcripts"]},
+    {"query":"What helped with transient request failures on the network?", "relevant":["timeout"]},
+    {"query":"How can we prevent one profile from seeing another user's memories?", "relevant":["scope"]},
+    {"query":"What conditions help tomatoes thrive?", "relevant":["garden"]},
+    {"query":"How do we verify durable records after a daemon restart?", "relevant":["tests"]}
+  ]
+}

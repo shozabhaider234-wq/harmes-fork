@@ -1,5 +1,9 @@
 # Team A — Shared Rust Memory, Agent-Directed Context & Prime-Inspired Learning
 
+Implementation status: this document records the original proposal. The current
+backend and native background-review integration are documented in
+[TEAM_A_README.md](TEAM_A_README.md) and [memd/NATIVE_REVIEW.md](memd/NATIVE_REVIEW.md).
+
 **Project:** Shared-Memory, Self-Evaluating Agent Harness (Hermes fork)  
 **Owner:** Team A (A1 and A2)  
 **Timeline:** 9 build weeks + 1 spare week  
