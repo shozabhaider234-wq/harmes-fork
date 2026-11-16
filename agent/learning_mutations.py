@@ -57,13 +57,14 @@ def _locate_memory(node_id: str) -> tuple[Path, list[str], int]:
     card's local index is its global index minus the MEMORY.md card count). Read-only
     view: mutations resolve the id again INSIDE ``_mutate_memory``'s lock."""
     from hermes_constants import get_hermes_home
-    from tools.memory_tool import MemoryStore
+    from tools.memory_tool import load_on_disk_store
 
     source, gidx, fingerprint = _parse_memory_id(node_id)
     path = get_hermes_home() / "memories" / _MEMORY_FILES[source]
-    if not path.exists():
+    store = load_on_disk_store()
+    if store.uses_markdown and not path.exists():
         raise ValueError(f"{path.name} not found")
-    chunks = MemoryStore._read_file(path)
+    chunks = store._entries_for(_STORE_TARGETS[source])
     if fingerprint:
         local = _resolve_fingerprint(chunks, fingerprint)
         if local is None:

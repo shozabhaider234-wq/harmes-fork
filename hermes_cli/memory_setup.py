@@ -365,7 +365,7 @@ def cmd_status(args) -> None:
     memory_tool_enabled = ("memory" in cli_tools) and check_memory_requirements()
 
     print("\nMemory status\n" + "─" * 40)
-    print("  Built-in (MEMORY.md / USER.md):")
+    print("  Native memory stores:")
     print(f"    Memory injection:   {_mark(mem_config.get('memory_enabled', True))}")
     print(f"    User profile:       {_mark(mem_config.get('user_profile_enabled', True))}")
     print(f"    Memory tool:        {_mark(memory_tool_enabled)}")

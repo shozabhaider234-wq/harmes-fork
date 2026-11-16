@@ -485,10 +485,12 @@ async def get_memory_status(profile: Optional[str] = None):
         mem = cfg.get("memory")
         active = _normalize_memory_provider_name(mem.get("provider")) if isinstance(mem, dict) else ""
         mem_dir = get_hermes_home() / "memories"
+        from tools.memory_tool import load_on_disk_store
+        store = load_on_disk_store()
         files = {}  # sizes so the UI can show what a reset would erase
         for fname, key in _MEMORY_FILES:
             path = mem_dir / fname
-            files[key] = path.stat().st_size if path.exists() else 0
+            files[key] = (path.stat().st_size if path.exists() else 0) if store.uses_markdown else len("\n".join(store._entries_for(key)).encode("utf-8"))
         return {"active": active, "providers": _discover_memory_provider_statuses(), "builtin_files": files}
 
     return await config_scoped_to_thread(profile, _run)
@@ -524,8 +526,17 @@ async def reset_memory(body: MemoryReset, profile: Optional[str] = None):
 
     def _run():
         mem_dir = get_hermes_home() / "memories"
+        from tools.memory_tool import load_on_disk_store
+        store = load_on_disk_store()
         deleted = []
         for fname, key in _MEMORY_FILES:
+            if not store.uses_markdown:
+                if target in {"all", key}:
+                    result = store._mutate(key, lambda entries, limit: ([], "Memory cleared."))
+                    if not result.get("success"):
+                        raise HTTPException(status_code=500, detail=result.get("error"))
+                    deleted.append(fname)
+                continue
             path = mem_dir / fname
             if target in {"all", key} and path.exists():
                 try:

@@ -21,6 +21,8 @@ def _cmd_memory_off():
 
 def _cmd_memory_reset(args):
     from hermes_constants import get_hermes_home, display_hermes_home
+    from tools.memory_tool import load_on_disk_store
+    store = load_on_disk_store()
     mem_dir = get_hermes_home() / "memories"
     target = getattr(args, "target", "all")
     files_to_reset = []
@@ -29,14 +31,16 @@ def _cmd_memory_reset(args):
     if target in {"all", "user"}:
         files_to_reset.append(("USER.md", "user profile"))
 
-    existing = [(f, desc) for f, desc in files_to_reset if (mem_dir / f).exists()]
+    targets = {"MEMORY.md":"memory", "USER.md":"user"}
+    existing = [(f, desc) for f, desc in files_to_reset
+                if ((mem_dir / f).exists() if store.uses_markdown else store._entries_for(targets[f]))]
     if not existing:
         print(f"\n  Nothing to reset — no memory files found in {display_hermes_home()}/memories/\n")
         return
 
-    print("\n  This will permanently erase the following memory files:")
+    print("\n  This will permanently erase the following memories:")
     for f, desc in existing:
-        size = (mem_dir / f).stat().st_size
+        size = (mem_dir / f).stat().st_size if store.uses_markdown else len("\n".join(store._entries_for(targets[f])).encode("utf-8"))
         print(f"    ◆ {f} ({desc}) — {size:,} bytes")
 
     if not getattr(args, "yes", False):
@@ -50,7 +54,12 @@ def _cmd_memory_reset(args):
             return
 
     for f, desc in existing:
-        (mem_dir / f).unlink()
+        if store.uses_markdown:
+            (mem_dir / f).unlink()
+        else:
+            result = store._mutate(targets[f], lambda entries, limit: ([], "Memory cleared."))
+            if not result.get("success"):
+                raise RuntimeError(result.get("error"))
         print(f"  ✓ Deleted {f} ({desc})")
 
     print("\n  Memory reset complete. New sessions will start with a blank slate.")

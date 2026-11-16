@@ -1309,7 +1309,8 @@ def _memory_provider_init_kwargs(agent, platform) -> Dict[str, Any]:
 
 
 def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
-    # Persistent memory (MEMORY.md + USER.md) — loaded from disk
+    # Native memory semantics; persistence may be supplied by the selected provider.
+    mem_config = {}
     agent._memory_store = None
     agent._memory_enabled = False
     agent._user_profile_enabled = False
@@ -1329,23 +1330,17 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
     )
     if not skip_memory or _memory_toolset_requested:
         # Memory is optional — don't break agent init
-        with suppress(Exception):
+        try:
             from tools.memory_tool import (
-                MemoryStore, get_builtin_memory_config, get_builtin_memory_store_flags,
+                create_memory_store, get_builtin_memory_config, get_builtin_memory_store_flags,
             )
             mem_config = get_builtin_memory_config(_agent_cfg)
             agent._memory_enabled, agent._user_profile_enabled = get_builtin_memory_store_flags(
                 _agent_cfg
             )
             agent._memory_nudge_interval = int(mem_config.get("nudge_interval", 10))
-            if agent._memory_enabled or agent._user_profile_enabled:
-                agent._memory_store = MemoryStore(
-                    memory_char_limit=mem_config.get("memory_char_limit", 2200),
-                    user_char_limit=mem_config.get("user_char_limit", 1375),
-                    memory_enabled=agent._memory_enabled,
-                    user_profile_enabled=agent._user_profile_enabled,
-                )
-                agent._memory_store.load_from_disk()
+        except Exception as error:
+            _ra().logger.warning("Native memory store initialization failed: %s", error)
 
     # External memory provider plugin (one at a time, alongside built-in): memory.provider.
     agent._memory_manager = None
@@ -1384,6 +1379,21 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
         except Exception as _mpe:
             _ra().logger.warning("Memory provider plugin init failed: %s", _mpe)
             agent._memory_manager = None
+
+    if agent._memory_enabled or agent._user_profile_enabled:
+        try:
+            # Reuse a handed-in/session provider: loading it again loses provider
+            # lifecycle state and violates the gateway's manager-reuse contract.
+            providers = agent._memory_manager.providers if agent._memory_manager else []
+            provider = next((p for p in providers if p.name == mem_config.get("provider")), None)
+            agent._memory_store = create_memory_store(_agent_cfg, provider=provider,
+                memory_char_limit=mem_config.get("memory_char_limit", 2200),
+                user_char_limit=mem_config.get("user_char_limit", 1375),
+                memory_enabled=agent._memory_enabled,
+                user_profile_enabled=agent._user_profile_enabled)
+            agent._memory_store.load_from_disk()
+        except Exception as error:
+            _ra().logger.warning("Native memory store initialization failed: %s", error)
 
     from agent.memory_manager import inject_memory_provider_tools
     inject_memory_provider_tools(agent)

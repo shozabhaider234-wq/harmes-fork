@@ -44,19 +44,39 @@ from tools.memory_tool_store import (  # noqa: E402,F401  (re-exports)
     ENTRY_DELIMITER, MEMORY_BLOCK_HEADERS, MemoryStore, _scan_memory_content)
 
 
+def create_memory_store(config=None, *, provider=None, **kwargs) -> "MemoryStore":
+    """Select the native persistence adapter through the configured provider."""
+    from agent.memory_provider import is_core_memory_provider
+    provider_name = get_builtin_memory_config(config).get("provider", "")
+    if not is_core_memory_provider(provider_name):
+        from plugins.memory import load_memory_provider
+        if provider is None:
+            provider = load_memory_provider(provider_name)
+        if provider is None:
+            raise RuntimeError(f"Configured memory provider {provider_name!r} could not be loaded")
+        factory = getattr(provider, "create_native_store", None)
+        store = factory(**kwargs) if factory else None
+        if store is not None:
+            return store
+    return MemoryStore(**kwargs)
+
+
 def load_on_disk_store() -> "MemoryStore":
-    """Fresh on-disk MemoryStore with configured limits/flags for contexts with no live
+    """Fresh selected MemoryStore with configured limits/flags for contexts with no live
     agent (gateway, Desktop, ``/memory``) so approvals enforce the SAME caps as
-    ``agent_init``. Falls back to defaults if config can't load; never raises."""
+    ``agent_init``. Config read failures use defaults; backend failures propagate."""
     try:
         from hermes_cli.config import load_config
         config = load_config() or {}
         mem_cfg = get_builtin_memory_config(config)
         memory_enabled, user_profile_enabled = get_builtin_memory_store_flags(config)
-        store = MemoryStore(int(mem_cfg.get("memory_char_limit", 2200)), int(mem_cfg.get("user_char_limit", 1375)),
-                            memory_enabled=memory_enabled, user_profile_enabled=user_profile_enabled)
     except Exception:
-        store = MemoryStore()  # config optional — fall back to defaults rather than break /memory
+        config, mem_cfg = {}, {}
+        memory_enabled = user_profile_enabled = True
+    store = create_memory_store(config,
+        memory_char_limit=int(mem_cfg.get("memory_char_limit", 2200)),
+        user_char_limit=int(mem_cfg.get("user_char_limit", 1375)),
+        memory_enabled=memory_enabled, user_profile_enabled=user_profile_enabled)
     store.load_from_disk()
     return store
 

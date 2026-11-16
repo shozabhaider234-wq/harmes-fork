@@ -148,20 +148,21 @@ def memory_node_id(card: dict[str, Any], index: int) -> str:
 def _memory_cards() -> list[dict[str, Any]]:
     """``MEMORY.md`` / ``USER.md`` entries as the memory tool parses them; every
     entry becomes one card (MEMORY.md cards first, then USER.md)."""
-    from tools.memory_tool import MemoryStore
+    from tools.memory_tool import load_on_disk_store
 
+    store = load_on_disk_store()
     base = get_hermes_home() / "memories"
     cards: list[dict[str, Any]] = []
     for fname, source in (("MEMORY.md", "memory"), ("USER.md", "profile")):
         path = base / fname
         try:
-            file_ts = _to_int_ts(path.stat().st_mtime)
+            file_ts = _to_int_ts(path.stat().st_mtime) if store.uses_markdown else None
         except OSError:
-            continue
+            file_ts = None
         # The store's own parser (utf-8-sig, same delimiter): a hand-rolled split kept a Notepad
         # BOM glued to the first entry, so its fingerprint never matched the store's and the card
         # was "stale" forever.
-        for chunk_idx, chunk in enumerate(MemoryStore._read_file(path)):
+        for chunk_idx, chunk in enumerate(store._entries_for("user" if source == "profile" else "memory")):
             first = chunk.splitlines()[0].strip().lstrip("# ").strip()
             cards.append({
                 "source": source, "timestamp": file_ts + chunk_idx if file_ts is not None else None,

@@ -1,0 +1,3 @@
+name: hermes-memd
+version: 0.1.0
+description: "Local Rust memory provider; setup installs its runtime and Hermes starts it automatically."

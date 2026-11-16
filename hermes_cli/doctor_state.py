@@ -230,6 +230,9 @@ def _check_directory_structure(should_fix: bool, f: Finding) -> None:
     memories_dir = hermes_home / "memories"
     if not memory_on:
         return check_info("Built-in memory files disabled by config")
+    from tools.memory_tool import create_memory_store
+    if not create_memory_store().uses_markdown:
+        return check_info("Native memory uses the configured provider; Markdown files are preserved rollback data")
     existed = memories_dir.exists()
     ensure_dir(f, should_fix, memories_dir, f"{_DHH}/memories/ directory exists", f"Created {_DHH}/memories/",
                f"{_DHH}/memories/ not found")

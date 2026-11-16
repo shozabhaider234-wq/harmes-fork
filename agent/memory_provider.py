@@ -117,6 +117,14 @@ class MemoryProvider(ABC):
         """STATIC system-prompt text; "" to skip. Recalled context goes through prefetch(), not here."""
         return ""
 
+    def create_native_store(self, **kwargs):
+        """Optional replacement for native memory persistence, preserving its tool contract.
+
+        Return None to keep Markdown. Construction/load errors must propagate: silently
+        falling back would create a second authoritative store.
+        """
+        return None
+
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         """Formatted recall context for the upcoming turn ("" if none). Must be fast — recall
         in the background and return cached results; ``session_id`` scopes concurrent sessions."""
