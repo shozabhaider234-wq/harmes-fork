@@ -3,5 +3,13 @@ name = "memd"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["local-fastembed"]
+local-fastembed = ["memcore/local-fastembed"]
+
 [dependencies]
+memcore = { path = "../memcore", default-features = false }
 serde_json = ">=1.0.140, <2.0.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = ">=0.61.2, <0.63", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Threading", "Win32_System_Memory", "Win32_System_IO"] }

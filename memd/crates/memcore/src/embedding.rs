@@ -53,10 +53,16 @@ impl fmt::Display for EmbeddingError {
             Self::NonFiniteValue => f.write_str("embedding vector contains NaN or infinite values"),
             Self::ZeroNorm => f.write_str("embedding vector cannot have zero L2 norm"),
             Self::DimensionMismatch { expected, actual } => {
-                write!(f, "embedding dimension mismatch: expected {expected}, got {actual}")
+                write!(
+                    f,
+                    "embedding dimension mismatch: expected {expected}, got {actual}"
+                )
             }
             Self::ModelMismatch { expected, actual } => {
-                write!(f, "embedding model mismatch: expected '{expected}', got '{actual}'")
+                write!(
+                    f,
+                    "embedding model mismatch: expected '{expected}', got '{actual}'"
+                )
             }
         }
     }
@@ -435,7 +441,25 @@ impl FastEmbedBackend {
     /// `special_tokens_map.json`, and `tokenizer_config.json` in `model_dir`.
     pub fn load_from_dir(
         model_dir: &Path,
+        config: LocalModelConfig,
+    ) -> Result<Self, EmbeddingError> {
+        let runtime = std::env::var_os("ORT_DYLIB_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                model_dir.join(format!(
+                    "{}onnxruntime{}",
+                    std::env::consts::DLL_PREFIX,
+                    std::env::consts::DLL_SUFFIX
+                ))
+            });
+        Self::load_with_runtime(model_dir, config, &runtime)
+    }
+
+    /// Select the runtime by absolute file identity, bypassing Windows' system DLL search.
+    pub fn load_with_runtime(
+        model_dir: &Path,
         mut config: LocalModelConfig,
+        runtime_path: &Path,
     ) -> Result<Self, EmbeddingError> {
         config.validate()?;
         config.model_id = config.model_id.trim().to_string();
@@ -443,7 +467,10 @@ impl FastEmbedBackend {
         let read_artifact = |filename: &str| -> Result<Vec<u8>, EmbeddingError> {
             let path = model_dir.join(filename);
             fs::read(&path).map_err(|err| {
-                EmbeddingError::ModelLoad(format!("missing or unreadable {}: {err}", path.display()))
+                EmbeddingError::ModelLoad(format!(
+                    "missing or unreadable {}: {err}",
+                    path.display()
+                ))
             })
         };
 
@@ -459,12 +486,16 @@ impl FastEmbedBackend {
             PoolingStrategy::Mean => Pooling::Mean,
             PoolingStrategy::Cls => Pooling::Cls,
         };
-        let user_model = UserDefinedEmbeddingModel::new(onnx_file, tokenizer_files)
-            .with_pooling(pooling);
+        let user_model =
+            UserDefinedEmbeddingModel::new(onnx_file, tokenizer_files).with_pooling(pooling);
+
+        let environment = runtime_environment(runtime_path)?;
 
         let model = TextEmbedding::try_new_from_user_defined(
             user_model,
-            InitOptionsUserDefined::default(),
+            InitOptionsUserDefined::default()
+                .with_environment(environment)
+                .with_intra_threads(2),
         )
         .map_err(|err| EmbeddingError::ModelLoad(err.to_string()))?;
 
@@ -477,6 +508,37 @@ impl FastEmbedBackend {
     pub fn config(&self) -> &LocalModelConfig {
         &self.config
     }
+}
+
+#[cfg(feature = "local-fastembed")]
+fn runtime_environment(path: &Path) -> Result<ort::environment::Environment, EmbeddingError> {
+    static RUNTIME: Mutex<Option<(std::path::PathBuf, ort::environment::Environment)>> =
+        Mutex::new(None);
+    let path = path.canonicalize().map_err(|e| {
+        EmbeddingError::ModelLoad(format!(
+            "ONNX runtime {}: {e}; provide --ort-dylib or ORT_DYLIB_PATH",
+            path.display()
+        ))
+    })?;
+    let mut runtime = RUNTIME
+        .lock()
+        .map_err(|_| EmbeddingError::ModelLoad("runtime initialization lock poisoned".into()))?;
+    if let Some((loaded_path, environment)) = runtime.as_ref() {
+        if loaded_path != &path {
+            return Err(EmbeddingError::InvalidConfig(
+                "one ONNX Runtime library is allowed per process; restart to change it".into(),
+            ));
+        }
+        return Ok(environment.clone());
+    }
+    let environment = ort::init_from(&path)
+        .map_err(|e| EmbeddingError::ModelLoad(e.to_string()))?
+        .with_name("memcore")
+        .with_telemetry(false)
+        .build()
+        .map_err(|e| EmbeddingError::ModelLoad(e.to_string()))?;
+    *runtime = Some((path, environment.clone()));
+    Ok(environment)
 }
 
 #[cfg(feature = "local-fastembed")]
@@ -576,7 +638,11 @@ mod tests {
                 } else {
                     0.2
                 },
-                if lower.starts_with("query:") { 2.0 } else { 0.0 },
+                if lower.starts_with("query:") {
+                    2.0
+                } else {
+                    0.0
+                },
             ];
             Embedding::from_raw(&self.model_id, raw, 3)
         }
@@ -693,12 +759,15 @@ mod tests {
 
         // Injected failure leaves content and embedding completely unchanged.
         backend.fail_next.store(true, Ordering::SeqCst);
-        assert!(mem.set_content("Use Rust cargo workspace", &backend).is_err());
+        assert!(mem
+            .set_content("Use Rust cargo workspace", &backend)
+            .is_err());
         assert_eq!(mem.entry().content(), "User prefers Neovim editor");
         assert_eq!(mem.embedding().as_slice(), initial_vec.as_slice());
 
         // Successful content mutation refreshes embedding atomically.
-        mem.set_content("Use Rust cargo workspace", &backend).unwrap();
+        mem.set_content("Use Rust cargo workspace", &backend)
+            .unwrap();
         assert_eq!(mem.entry().content(), "Use Rust cargo workspace");
         assert_ne!(mem.embedding().as_slice(), initial_vec.as_slice());
 

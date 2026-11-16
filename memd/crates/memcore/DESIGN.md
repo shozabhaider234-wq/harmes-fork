@@ -31,4 +31,21 @@
 ---
 
 ### 3. P0: Persisting memories (`memcore::storage` — [storage.rs](/memd/crates/memcore/src/storage.rs), [lib.rs](/memd/crates/memcore/src/lib.rs), [Cargo.toml](/memd/crates/memcore/Cargo.toml)) — Done
-> no extraordinary decisions from the standard
+> Legacy JSONL/InMemoryStore APIs remain intact. The runtime storage decision below supersedes corpus loading for daemon retrieval.
+
+### 4. Persistent extracted-memory storage (`memcore::sqlite`) — implemented
+
+SQLite with statically linked sqlite-vec is the selected persistent memory backend;
+FTS5 supplies keyword retrieval and reciprocal rank fusion combines bounded candidate
+sets. `MemoryRecord` wraps the existing entry with typed kind/scope/provenance fields.
+Vectors live in a vec0 virtual table keyed to the memory row ID, avoiding loading
+the corpus/embeddings into Rust at startup. Transactions and deletion triggers keep
+record, vector and FTS state consistent. WAL coordinates multiple connections; one
+mutex serializes operations within an engine. Schema migrations and model identity
+are checked at open; foreign SQLite databases are refused before modification.
+
+This separates stored vectors from entry payloads as required by the finalized
+persistent-storage architecture; Stage 2's in-memory wrapper remains a valid API.
+No transcript migration, Prime algorithm, automatic extraction or Team B changes.
+See [Team A architecture](../../../../TEAM_A_README.md) and
+[validation receipt](../../VALIDATION.md) for tested status and remaining platform work.

@@ -1,4 +1,4 @@
-# `memcore` API Reference (Stages 1–3)
+# `memcore` API Reference
 
 Public Rust API and implemented capabilities for `memcore` (`memd/crates/memcore`). Everything documented below matches the current code in [lib.rs](src/lib.rs), [types.rs](src/types.rs), [embedding.rs](src/embedding.rs), and [storage.rs](src/storage.rs); see [DESIGN.md](DESIGN.md) for design rationale and invariants.
 
@@ -12,7 +12,9 @@ Public Rust API and implemented capabilities for `memcore` (`memd/crates/memcore
 4. **Rank memories by dense semantic similarity (`find_similar_memories`):** Score candidates with pure dot product, gating strictly on matching `model_id` and dimensionality, filtering by threshold, and returning top `limit` hits.
 5. **Persist and query records durably (`memcore::storage`):** Store, batch-upsert, fetch by ID, delete, reload, and atomically compact `EmbeddedMemory` records in a versioned append-only JSONL file (`JsonlStore`) or an ephemeral `InMemoryStore`.
 
-> **Not yet implemented:** `memcore` does not yet include BM25 lexical ranking, graph edges/cascade retrieval, hybrid fusion, LLM extraction, or engine integration with the `memd` daemon (which still runs `MockEngine`; see [protocol.md](../../protocol.md)).
+6. **Persistent scoped retrieval (`memcore::sqlite`):** `SqliteStore` owns a separate SQLite/FTS5/sqlite-vec database with typed `MemoryRecord`, model-space validation, provenance, exact dedup, CRUD, vector/keyword/hybrid search, expiry and metadata filtering. This is the normal daemon backend. The JSONL APIs below remain supported library alternatives, not the runtime corpus-loading path.
+
+> **Not yet implemented:** graph edges/cascade retrieval, automatic LLM extraction and real session-history search. Session search and turn extraction remain empty engine hooks (see [protocol.md](../../protocol.md)). Learning artifacts and original Hermes transcripts are not owned by this store.
 
 ---
 
@@ -22,14 +24,67 @@ Declared in [Cargo.toml](Cargo.toml):
 
 | Feature | Default | Effect |
 |---|---|---|
-| `local-fastembed` | Yes | Enables `FastEmbedBackend` (`fastembed` with `ort-download-binaries-rustls-tls`). |
-| `--no-default-features` | No | Pure-Rust build with no ONNX/C++ runtime dependencies; keeps `EmbeddingBackend`, `EmbeddedMemory`, `find_similar_memories`, `InMemoryStore`, and `JsonlStore`. |
+| `local-fastembed` | Yes | Enables offline `FastEmbedBackend`, with `ort-load-dynamic` and explicit runtime library selection; no build-time runtime download. |
+| `--no-default-features` | No | No ONNX runtime; includes all storage APIs and `SyntheticEmbedding`. Bundled SQLite and sqlite-vec require a C compiler/linker. |
 
 All public symbols are re-exported at the crate root (`use memcore::*;` or `use memcore::{...};`), in addition to module paths `memcore::types`, `memcore::embedding`, and `memcore::storage`.
 
+For real models, select a compatible runtime explicitly using
+`FastEmbedBackend::load_with_runtime(model_dir, config, library_path)`.
+`load_from_dir` reads `ORT_DYLIB_PATH` or expects the platform library in the model
+directory; it never searches for an arbitrary system DLL. Incompatible/missing
+libraries return `EmbeddingError::ModelLoad`. Telemetry is disabled. See
+[INTEGRATION.md](../../INTEGRATION.md) for the working Windows helper and real tests.
+
 ---
 
-## Quick End-to-End Example
+## Persistent SQLite example
+
+```rust
+use memcore::{EmbeddingBackend, MemoryCategory, MemoryEntry, MemoryRecord,
+    RetrievalMode, RetrievalScope, SqliteConfig, SqliteStore, SyntheticEmbedding};
+
+# fn example() -> memcore::sqlite::Result<()> {
+// Synthetic provider is an offline fixture, not production semantic retrieval.
+let provider = SyntheticEmbedding::new(128)?;
+let store = SqliteStore::open("extracted-memories.db", provider.model_id(),
+    provider.dim(), SqliteConfig::default())?;
+let mut record = MemoryRecord::new(MemoryEntry::new("Prefers Rust examples",
+    MemoryCategory::Preference, vec!["rust".into()]));
+record.session_id = Some("session-42".into());
+record.source_ref = Some("hermes://profile-a/sessions/session-42/messages/uid-7".into());
+let id = store.ingest(&record, &provider)?;
+let hits = store.retrieve("Rust examples", &RetrievalScope::default(), 5,
+    RetrievalMode::Hybrid, &provider)?;
+assert_eq!(hits[0].record.entry.id, id);
+record.entry.set_content("Prefers concise Rust examples");
+store.update(&record, &provider)?;
+assert!(store.source(&id)?.is_some());
+store.delete(&id)?;
+# Ok(()) }
+```
+
+`store(&record, &embedding)` also accepts validated supplied embeddings; callers
+are responsible for binding them to the record's text. `update` requires an existing
+ID, while `ingest`/`store` upsert. Updates replace complete metadata, preserve creation
+time and atomically regenerate/replace the embedding. `get`/`source` are trusted
+administrative lookups by ID, including expired records. `delete` removes the record,
+vector and FTS index entry. `stats` reports actual allocated DB/vector pages.
+
+`RetrievalScope` defaults to `default`/`private`/unowned. It optionally filters
+agent/session/kind/tag. Ownership restrictions and expiry apply before KNN's top-k;
+hybrid uses two bounded branches in a single read snapshot. `RankedMemory` returns
+the record, score and optional cosine distance. RRF constant, cache size, timeout
+and maximum top-k are in `SqliteConfig`. No corpus-level Rust vector cache exists.
+
+SQLite migration version 1 is the relational/FTS schema; version 2 adds vec0 with
+the configured dimension. Newer schemas or incompatible model spaces are rejected
+on open. Existing JSONL files are not automatically imported, and unrelated SQLite
+databases are rejected before changing schema/journaling. Model revision/config
+must be part of the provider's model ID; use a separate database for a changed space.
+See [Team A architecture](../../../../TEAM_A_README.md) for lifecycle and provenance.
+
+## Legacy JSONL end-to-end example
 
 ```rust
 use std::path::Path;
@@ -313,9 +368,9 @@ pub struct JsonlStoreConfig {
 
 ---
 
-## 4. Workspace Context: `memd` IPC Prototype (Unwired)
+## 4. Workspace Context: `memd` IPC Adapter
 
-The sibling daemon crate (`memd/crates/memd`) currently runs an in-memory `MockEngine` prototype and is **not yet integrated with `memcore`**. Its JSON Lines v1 wire protocol ([protocol.md](../../protocol.md)) currently accepts requests up to 1 MiB (`{"v":1,"id":...,"op":"..."}`) for four operations:
+The sibling daemon crate (`memd/crates/memd`) adapts the durable `MemCoreEngine` to the JSON Lines v1 protocol ([protocol.md](../../protocol.md)); `MockEngine` remains available with `--mock`. Requests are limited to 1 MiB (`{"v":1,"id":...,"op":"..."}`) and support four operations:
 
 - `ping` — health check (`{"status":"ok"}`).
 - `store` — accepts an opaque JSON `entry` object and returns an `id`.
