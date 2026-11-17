@@ -96,7 +96,7 @@ are not downloaded.
 Defaults in profile-local `memd.json` (non-secret configuration):
 
 ```json
-{"endpoint":"pipe:hermes-memd","namespace":"hermes","top_k":10,"token_budget":1000}
+{"endpoint":"pipe:hermes-memd","namespace":"hermes","top_k":10,"token_budget":4000,"safe_available_tokens":1000,"detail_budgets":{"brief":300,"normal":1000,"deep":2000,"exhaustive":4000},"minimum_utility_per_token":0.0}
 ```
 
 On Unix the default endpoint is a profile-local Unix socket. Other supported
@@ -112,6 +112,25 @@ The `memd_memory` provider tool supports:
   stores environment/project facts. Matching native/explicit saves in the same
   target reuse the existing record ID. Native character budgets apply.
 - `recall`: return a temporary budgeted context package as a tool result.
+  Optional `detail` values are `brief`, `normal` (the default), `deep`, and
+  `exhaustive`, with preferred budgets of 300, 1,000, 2,000, and 4,000 tokens.
+  `detail_budgets` configures those values; `token_budget` is the hard cap and
+  `safe_available_tokens` is the fallback ceiling. In the Hermes tool path, the
+  bridge supplies cached prompt occupancy and context-window metadata when available;
+  otherwise it conservatively falls back to 1,000 tokens. The Python builder accepts
+  a caller-supplied counter and verifies the finished formatted package against its
+  budget. Hermes does not expose an active provider tokenizer at this boundary, so
+  the bridge uses Hermes' shared rough estimator with 25% padding and reports
+  `hermes_rough_estimate_padded`; the builder uses the same estimator by default.
+  Package diagnostics include the effective budget, selected IDs, provenance,
+  retrieval/selection/omission/clipping counts, truncation, and an estimated
+  candidate baseline/token-saved count; these fields stay outside LLM context text.
+  Configure `minimum_utility_per_token` above zero to omit weak candidates and
+  allow unused budget. Zero disables the cutoff. Hybrid retrieval uses RRF scores,
+  which are treated as ranks rather than probabilities. Exact duplicate summaries
+  are removed; explicit `superseded_by` metadata is honored. Expiry filtering occurs
+  in Rust and timestamps alone do not discard historical facts. No semantic
+  contradiction detector runs.
 - `source`: resolve a returned `source_ref` against the current profile's original
   Hermes session DB, read-only, returning a bounded original excerpt.
 - `history`: search original session messages read-only; never memory facts.
@@ -137,12 +156,71 @@ supports updates by ID. Writes are disabled for non-primary agent contexts.
 `sync_turn` remains a no-op: ordinary conversation is neither copied nor embedded.
 The static system prompt block is empty. Context appears only in an explicit tool
 result; the bridge never mutates the prompt or injects conversation messages.
-The existing ContextBuilder uses a conservative byte-based token estimate unless a
-caller supplies a tokenizer. This is not an always-on LLM extractor or Prime algorithm.
+The ContextBuilder uses Hermes' shared rough token estimate with 25% safety padding
+unless a caller supplies a counter. This is not an always-on LLM extractor or Prime algorithm.
+Selection is deterministic and bounded by the retrieved top-k. Optional utility
+thresholding and freshness checks add no model calls or embeddings. Raising the
+fallback ceiling can return more memory on models with smaller context windows;
+choose it only when the caller knows adequate room is available.
 
 The daemon's legacy `search_sessions` hook remains empty for backward compatibility;
 the optional Python bridge owns read-only access to the user's original session DB.
 No original transcript writes, migrations or lifecycle changes are introduced.
+
+## Live context budget and historical retrieval
+
+For `memd_memory`, Hermes passes cached context-window metadata plus provider-reported
+prompt and completion usage from the immediately preceding request. The bridge
+subtracts that occupancy, the configured next-response reserve, a 1,024-token safety
+margin, and bounded room for tool-result wrappers/other tool results. It divides
+remaining room across parallel memory calls and applies the requested detail budget
+and `hard_token_cap`. The old `safe_available_tokens` value (default 1,000) remains
+the fallback only when reliable occupancy is unavailable. Unknown model limits do
+not get inferred from model names or trigger metadata network probes.
+
+Before sending, Hermes checks the complete API-copy prompt, including messages and
+tool schemas, against cached context metadata. If needed, it trims only the
+`memd_memory` result text; the transcript and other tool results are unchanged.
+Hermes' existing pressure/compaction flow remains authoritative. This is a
+conservative estimate: tool schemas and next-call wrappers are estimated, and exact
+future content is unknowable before all tools return. No memory text is inserted
+twice.
+
+The Hermes boundary currently has no provider-selected tokenizer. Counts use
+`agent.model_metadata.estimate_tokens_rough` and are padded in the ContextBuilder;
+diagnostics identify this as an estimate, not exact tokenizer output. A direct
+caller can supply its own counter, which is applied to final JSON formatting, IDs,
+provenance and separators. Each retrieved candidate is serialized and counted once;
+retrieval is bounded to at most 100 per namespace.
+
+Rust stores optional `superseded_by` in the record payload and indexed column
+(migration 003). Links must resolve inside the same namespace, access scope and
+agent; self-links, missing targets, cross-scope links and cycles are rejected in the
+write transaction. Default retrieval omits superseded records. Historical requests
+may set `include_superseded: true`; returned historical context retains the link and
+source provenance. Deleting a replacement clears its incoming links, preserving
+older facts without claiming they are current. Supersession is explicit; timestamps
+alone never remove stable historical facts.
+
+Utility cutoff calibration remains opt-in (`minimum_utility_per_token: 0`). RRF is
+rank-normalized and never treated as a probability. The synthetic comparison below
+measures packaging cost only, not semantic quality or task success. Keep the cutoff
+disabled unless a manually labeled, held-out query set shows required evidence
+remains covered while reducing tokens.
+
+Latest local 100-run synthetic receipt (120 identical candidates across variants,
+10 manually designated required IDs and 21 relevant IDs; estimates use UTF-8 bytes
+/ 4): fixed 1,000-token package returned 1,000 tokens, selected 20, retained 5/10
+required (0.50 required coverage; 0.381 relevant recall), 18.183 ms median and
+216,128-byte Python traced peak. A 700-token ceiling returned 695 tokens (30.5%
+fewer than fixed), selected 14, retained 4/10 required (0.40 coverage; 0.286
+relevant recall), 141.590 ms and 185,472 bytes. Adding a 0.002 utility cutoff
+returned the same 695 tokens and evidence (124.642 ms, 187,633 bytes). This fixture
+therefore shows a token/RAM reduction from a smaller ceiling with lost labeled
+evidence; the cutoff added no measured reduction. It does not justify enabling the
+cutoff or claim semantic quality. Timing varies on a shared Windows host; Python
+tracemalloc excludes Rust and whole-process RSS. Run
+`python memd/scripts/benchmark_context_builder.py` to reproduce.
 
 ## Reproducing follow-up checks
 

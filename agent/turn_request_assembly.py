@@ -229,6 +229,11 @@ def assemble_api_request(
             agent, api_messages, pending_moa_prepared_request
         )
 
+    # The tool result was sized before other tools in its batch finished. Recheck
+    # the complete next prompt, including schemas, and trim only the API copy.
+    from agent.memory_context_budget import trim_memory_tool_results
+    trim_memory_tool_results(api_messages, tools_for_api, agent)
+
     # One image-stripped estimate feeds both figures; tools counted separately (50+
     # tools ≈ 20-30K tokens); total_chars is a rough proxy for logs/hooks only.
     # Charge stale thinking only when the active route replays it.

@@ -331,7 +331,13 @@ def resolve_invoke_tool_executor(agent, function_name: str) -> Optional[InlineTo
         return INLINE_TOOL_EXECUTORS[function_name]
     memory_manager = agent._memory_manager
     if memory_manager and memory_manager.has_tool(function_name):
-        return lambda agent, args, ctx: agent._memory_manager.handle_tool_call(function_name, args)
+        def _provider_call(agent, args, ctx):
+            kwargs = {}
+            if function_name == "memd_memory":
+                from agent.memory_context_budget import memory_provider_call_kwargs
+                kwargs = memory_provider_call_kwargs(agent, ctx.messages)
+            return agent._memory_manager.handle_tool_call(function_name, args, **kwargs)
+        return _provider_call
     if function_name == "message_agent":
         return None
     return INLINE_TOOL_EXECUTORS.get(function_name)

@@ -46,6 +46,8 @@ pub struct MemoryRecord {
     pub importance: Option<f32>,
     pub confidence: Option<f32>,
     pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub superseded_by: Option<String>,
 }
 impl MemoryRecord {
     pub fn new(entry: MemoryEntry) -> Self {
@@ -60,6 +62,7 @@ impl MemoryRecord {
             importance: None,
             confidence: None,
             expires_at: None,
+            superseded_by: None,
         }
     }
     fn validate(&self) -> Result<()> {
@@ -78,6 +81,9 @@ impl MemoryRecord {
         }
         if self.agent_id.as_ref().is_some_and(|s| s.trim().is_empty()) {
             return Err(invalid("agent_id must be non-empty when provided"));
+        }
+        if self.superseded_by.as_ref().is_some_and(|id| id.trim().is_empty() || id == &self.entry.id) {
+            return Err(invalid("superseded_by must name a different non-empty memory ID"));
         }
         if [self.importance, self.confidence]
             .iter()
@@ -170,7 +176,8 @@ pub struct SqliteStore {
 const FILTER: &str = "m.namespace=:ns AND m.access_scope=:scope AND m.agent_id=:agent
  AND (:session IS NULL OR m.session_id=:session) AND (:kind IS NULL OR m.kind=:kind)
  AND (:tag IS NULL OR EXISTS(SELECT 1 FROM json_each(m.payload, '$.tags') WHERE value=:tag))
- AND (m.expires_at IS NULL OR m.expires_at>:now)";
+ AND (m.expires_at IS NULL OR m.expires_at>:now)
+ AND (:include_superseded=1 OR m.superseded_by IS NULL)";
 fn kind_name(kind: MemoryKind) -> &'static str {
     match kind {
         MemoryKind::Semantic => "semantic",
@@ -253,7 +260,7 @@ impl SqliteStore {
             return Err(invalid("refusing to modify an unrelated SQLite database; choose a separate memory database"));
         }
         let version: u32 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 2 {
+        if version > 3 {
             return Err(invalid("database schema is newer than this engine"));
         }
         db.busy_timeout(Duration::from_millis(config.busy_timeout_ms))?;
@@ -264,7 +271,7 @@ impl SqliteStore {
         ))?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: u32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 2 {
+        if version > 3 {
             return Err(invalid("database schema is newer than this engine"));
         }
         if version == 0 {
@@ -287,6 +294,9 @@ impl SqliteStore {
             tx.execute_batch(&format!("CREATE VIRTUAL TABLE memory_vectors USING vec0(embedding float[{dimension}] distance_metric=cosine);
                 CREATE TRIGGER memories_vectors_ad AFTER DELETE ON memories BEGIN DELETE FROM memory_vectors WHERE rowid=old.rowid; END;
                 PRAGMA user_version=2;"))?;
+        }
+        if version < 3 {
+            tx.execute_batch(include_str!("migrations/003.sql"))?;
         }
         tx.commit()?;
         Ok(Self {
@@ -348,6 +358,7 @@ impl SqliteStore {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "memory does not exist").into(),
             );
         }
+        Self::validate_supersession(tx, record)?;
         let agent = record.agent_id.as_deref().unwrap_or("");
         let duplicate: Option<String> = tx.query_row("SELECT id FROM memories WHERE namespace=?1 AND access_scope=?2 AND agent_id=?3 AND kind=?4 AND normalized_text=?5 AND id<>?6",
             params![record.namespace, record.access_scope, agent, kind_name(record.kind), normalized, record.entry.id], |r| r.get(0)).optional()?;
@@ -376,12 +387,14 @@ impl SqliteStore {
             record.entry.created_at = old.entry.created_at;
             record.entry.updated_at = Utc::now();
         }
-        tx.execute("INSERT INTO memories(id,namespace,access_scope,agent_id,session_id,kind,normalized_text,content,tags,expires_at,payload)
-            VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(id) DO UPDATE SET namespace=excluded.namespace,
+        tx.execute("INSERT INTO memories(id,namespace,access_scope,agent_id,session_id,kind,normalized_text,content,tags,expires_at,payload,superseded_by)
+            VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) ON CONFLICT(id) DO UPDATE SET namespace=excluded.namespace,
             access_scope=excluded.access_scope,agent_id=excluded.agent_id,session_id=excluded.session_id,kind=excluded.kind,
-            normalized_text=excluded.normalized_text,content=excluded.content,tags=excluded.tags,expires_at=excluded.expires_at,payload=excluded.payload",
+            normalized_text=excluded.normalized_text,content=excluded.content,tags=excluded.tags,expires_at=excluded.expires_at,payload=excluded.payload,
+            superseded_by=excluded.superseded_by",
             params![record.entry.id, record.namespace, record.access_scope, agent, record.session_id, kind_name(record.kind), normalized,
-                record.entry.content(), record.entry.tags().join(" "), record.expires_at.map(|t| t.timestamp()), serde_json::to_string(&record)?])?;
+                record.entry.content(), record.entry.tags().join(" "), record.expires_at.map(|t| t.timestamp()), serde_json::to_string(&record)?,
+                record.superseded_by])?;
         let rowid: i64 = tx.query_row(
             "SELECT rowid FROM memories WHERE id=?1",
             [&record.entry.id],
@@ -393,6 +406,46 @@ impl SqliteStore {
             params![rowid, vector_blob(embedding)],
         )?;
         Ok(record.entry.id.clone())
+    }
+    fn validate_supersession(tx: &Connection, record: &MemoryRecord) -> Result<()> {
+        let has_incoming_links: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM memories WHERE superseded_by=?1)",
+            [&record.entry.id], |row| row.get(0),
+        )?;
+        if has_incoming_links {
+            let existing_scope: Option<(String, String, String)> = tx.query_row(
+                "SELECT namespace,access_scope,agent_id FROM memories WHERE id=?1",
+                [&record.entry.id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).optional()?;
+            if existing_scope.as_ref().is_some_and(|(namespace, access_scope, agent_id)|
+                namespace != &record.namespace || access_scope != &record.access_scope
+                    || agent_id != record.agent_id.as_deref().unwrap_or("")
+            ) {
+                return Err(invalid("cannot move a memory with incoming supersession links across scope"));
+            }
+        }
+        let Some(target_id) = record.superseded_by.as_deref() else { return Ok(()); };
+        let target: Option<(String, String, String)> = tx.query_row(
+            "SELECT namespace,access_scope,agent_id FROM memories WHERE id=?1", [target_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional()?;
+        let Some((namespace, access_scope, agent_id)) = target else {
+            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "superseding memory does not exist").into());
+        };
+        if namespace != record.namespace || access_scope != record.access_scope
+            || agent_id != record.agent_id.as_deref().unwrap_or("") {
+            return Err(invalid("supersession cannot cross namespace, access scope or agent"));
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut current = Some(target_id.to_owned());
+        while let Some(id) = current {
+            if id == record.entry.id || !seen.insert(id.clone()) {
+                return Err(invalid("supersession relationship would create a cycle"));
+            }
+            current = tx.query_row("SELECT superseded_by FROM memories WHERE id=?1", [&id],
+                |row| row.get::<_, Option<String>>(0)).optional()?.flatten();
+        }
+        Ok(())
     }
     fn inventory_in(db: &Connection, scope: &RetrievalScope) -> Result<Vec<MemoryRecord>> {
         if scope.namespace.trim().is_empty() || scope.access_scope.trim().is_empty()
@@ -448,6 +501,7 @@ impl SqliteStore {
         }
         for old in expected {
             if !ids.contains(&old.entry.id) {
+                tx.execute("UPDATE memories SET superseded_by=NULL,payload=json_set(payload,'$.superseded_by',NULL) WHERE superseded_by=?1", [&old.entry.id])?;
                 tx.execute("DELETE FROM memories WHERE id=?1", [&old.entry.id])?;
             } else if prepared.iter().any(|(r, _)| r.entry.id == old.entry.id) {
                 // Vacate dedup keys during a batch (e.g. two entries exchanging text).
@@ -491,6 +545,7 @@ impl SqliteStore {
     pub fn delete(&self, id: &str) -> Result<bool> {
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("UPDATE memories SET superseded_by=NULL,payload=json_set(payload,'$.superseded_by',NULL) WHERE superseded_by=?1", [id])?;
         let removed = tx.execute("DELETE FROM memories WHERE id=?1", [id])? > 0;
         tx.commit()?;
         Ok(removed)
@@ -502,6 +557,19 @@ impl SqliteStore {
         k: usize,
         mode: RetrievalMode,
         provider: &dyn EmbeddingBackend,
+    ) -> Result<Vec<RankedMemory>> {
+        self.retrieve_with_options(query, scope, k, mode, provider, false)
+    }
+
+    /// Retrieve current records by default; historical mode includes explicitly superseded rows.
+    pub fn retrieve_with_options(
+        &self,
+        query: &str,
+        scope: &RetrievalScope,
+        k: usize,
+        mode: RetrievalMode,
+        provider: &dyn EmbeddingBackend,
+        include_superseded: bool,
     ) -> Result<Vec<RankedMemory>> {
         if k == 0 || query.trim().is_empty() {
             return Ok(Vec::new());
@@ -544,7 +612,8 @@ impl SqliteStore {
             let rows = statement.query_map(rusqlite::named_params! {
                 ":query":query_value, ":k":k, ":ns":scope.namespace, ":scope":scope.access_scope,
                 ":agent":scope.agent_id.as_deref().unwrap_or(""), ":session":scope.session_id,
-                ":kind":scope.kind.map(kind_name), ":tag":scope.tag, ":now":Utc::now().timestamp()
+                ":kind":scope.kind.map(kind_name), ":tag":scope.tag, ":now":Utc::now().timestamp(),
+                ":include_superseded":include_superseded
             }, |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?)))?;
             for (rank, row) in rows.enumerate() {
                 let (id, raw) = row?;

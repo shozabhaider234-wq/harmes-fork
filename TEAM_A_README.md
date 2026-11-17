@@ -236,7 +236,7 @@ memd/
   crates/memcore/tests/sqlite_storage.rs
   crates/memd/src/lib.rs, main.rs     existing IPC + SQLite runtime adapter
   clients/python/memory_client.py    backward-compatible v1 client extensions
-  clients/python/context_builder.py existing A2 context prototype, unchanged
+  clients/python/context_builder.py existing Python selection and packaging with optional detail budgets, rank-aware utility cutoff, and explicit supersession handling
   clients/python/prime_learning.py  existing A2 artifact prototype, unchanged
   tests/test_persistent_client.py    real-daemon Python/client/transport tests
   scripts/measure.py                existing IPC/RSS tool, preserved
@@ -266,6 +266,20 @@ with no Hermes, Prime, context builder or AVO provider.
 
 ## Evaluation design
 
+Explicit recall uses provider-reported occupancy from the prior request and the
+cached active model context limit. A send-boundary check includes tool schemas and
+can trim the memory tool result in the API copy; Hermes' own prompt-pressure and
+compaction path stays authoritative. Since the provider does not expose its active
+tokenizer here, this path uses the shared Hermes rough counter plus safety padding.
+The ContextBuilder accepts a caller-supplied counter and applies it to the final
+serialized context, not just raw memory text.
+
+Rust schema migration 003 persists optional, same-scope `superseded_by` links.
+Current retrieval excludes marked-old rows by default; explicit historical recall
+returns them with the replacement ID and provenance. Cycles, self-links, missing
+targets and cross-scope links are rejected transactionally. No semantic freshness
+or contradiction detector runs.
+
 Keep correctness and semantic quality separate. Tests use temporary databases,
 deterministic synthetic vectors, real imports and real SQLite/vec0. They cover
 initialization/migration, both memory kinds, metadata, dimension/model validation,
@@ -283,6 +297,13 @@ Use the same machine/build/dimension/settings for comparisons; report model RSS
 and inference costs separately. Real quality requires a labeled semantic/episodic
 query set with the production model, recall@k/MRR, conflicting-fact checks and
 task-outcome/token-cost comparisons. Do not report these as measured until run.
+
+The latest ContextBuilder packaging-only comparison is recorded in
+[memd/INTEGRATION.md](memd/INTEGRATION.md#live-context-budget-and-historical-retrieval):
+the smaller synthetic ceiling saved 30.5% memory tokens but retained 4/10 versus
+5/10 manually labeled required records. The utility cutoff produced no additional
+token reduction, so it stays disabled by default. This does not establish query
+quality or task outcomes.
 
 The 1k/10k/100k synthetic runs have completed; [validation receipt](memd/VALIDATION.md)
 records their actual measurements and shared-machine limitations. At 100k, the main

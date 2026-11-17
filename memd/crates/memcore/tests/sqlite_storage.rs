@@ -113,7 +113,7 @@ fn initialization_migration_and_model_identity() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
             .unwrap(),
-        2
+        3
     );
     assert!(SqliteStore::open(&f.path, "other-model", 64, SqliteConfig::default()).is_err());
     assert!(
@@ -138,6 +138,47 @@ fn initialization_migration_and_model_identity() {
     assert!(upgraded.get("migrated").unwrap().is_some());
     drop(upgraded);
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn supersession_is_scoped_persistent_and_historical_only_on_request() {
+    let mut f = Fixture::new();
+    f.put("old", "old service location");
+    f.put("current", "current service location");
+    let mut old = Fixture::record("old", "old service location");
+    old.superseded_by = Some("current".into());
+    f.db().update(&old, &f.provider).unwrap();
+    let scope = RetrievalScope::default();
+    let current = f.db().retrieve("old service", &scope, 5, RetrievalMode::Keyword, &f.provider).unwrap();
+    assert!(current.iter().all(|hit| hit.record.entry.id != "old"));
+    let historical = f.db().retrieve_with_options("old service", &scope, 5, RetrievalMode::Keyword, &f.provider, true).unwrap();
+    assert_eq!(historical[0].record.superseded_by.as_deref(), Some("current"));
+    assert!(f.db().get("old").unwrap().unwrap().source_ref.is_none());
+
+    f.store.take();
+    f.store = Some(SqliteStore::open(&f.path, f.provider.model_id(), 64, SqliteConfig::default()).unwrap());
+    assert_eq!(f.db().get("old").unwrap().unwrap().superseded_by.as_deref(), Some("current"));
+    let mut cycle = Fixture::record("current", "current service location");
+    cycle.superseded_by = Some("old".into());
+    assert!(f.db().update(&cycle, &f.provider).is_err());
+    let mut moved = Fixture::record("current", "current service location");
+    moved.namespace = "other".into();
+    assert!(f.db().update(&moved, &f.provider).is_err());
+
+    let mut cross_scope = Fixture::record("foreign", "foreign replacement");
+    cross_scope.namespace = "other".into();
+    f.db().ingest(&cross_scope, &f.provider).unwrap();
+    let mut invalid = Fixture::record("invalid", "invalid reference");
+    invalid.superseded_by = Some("foreign".into());
+    assert!(f.db().ingest(&invalid, &f.provider).is_err());
+    invalid.superseded_by = Some("invalid".into());
+    assert!(f.db().ingest(&invalid, &f.provider).is_err());
+    invalid.superseded_by = Some("missing".into());
+    assert!(f.db().ingest(&invalid, &f.provider).is_err());
+    let inventory = f.db().inventory(&scope).unwrap();
+    let desired: Vec<_> = inventory.iter().filter(|record| record.entry.id != "current").cloned().collect();
+    assert!(f.db().compare_exchange(&scope, &inventory, &desired, &f.provider).unwrap());
+    assert_eq!(f.db().get("old").unwrap().unwrap().superseded_by, None);
 }
 
 #[test]

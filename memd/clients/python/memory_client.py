@@ -110,12 +110,14 @@ class MemdClient:
         return self.request("store", entry=entry)["id"]
 
     def retrieve(self, query: str, k: int = 5, *, scope: dict[str, Any] | None = None,
-                 mode: str | None = None) -> list[dict[str, Any]]:
+                 mode: str | None = None, include_superseded: bool = False) -> list[dict[str, Any]]:
         options: dict[str, Any] = {}
         if scope is not None:
             options["scope"] = scope
         if mode is not None:
             options["mode"] = mode
+        if include_superseded:
+            options["include_superseded"] = True
         return self.request("retrieve", query=query, k=k, **options)["hits"]
 
     def get_memory(self, memory_id: str) -> dict[str, Any] | None:

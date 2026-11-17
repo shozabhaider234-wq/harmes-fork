@@ -24,6 +24,42 @@ else:
     from memory_client import MemdClient
     from context_builder import ContextBuilder
 
+DETAIL_BUDGETS = {"brief": 300, "normal": 1000, "deep": 2000, "exhaustive": 4000}
+
+
+def _resolve_budget(detail, configured, token_budget=None, safe_available_tokens=None,
+                    context_capacity=None):
+    if detail not in DETAIL_BUDGETS:
+        raise ValueError(f"detail must be one of: {', '.join(DETAIL_BUDGETS)}")
+    budgets = {**DETAIL_BUDGETS, **(configured.get("detail_budgets") or {})}
+    available = int(safe_available_tokens if safe_available_tokens is not None
+                    else configured.get("safe_available_tokens", 1000))
+    reason = "fallback_without_prompt_occupancy"
+    if isinstance(context_capacity, dict):
+        values = [context_capacity.get(key) for key in (
+            "context_window", "prompt_tokens", "assistant_output_tokens", "reserved_output_tokens",
+        )]
+        if all(isinstance(value, int) and value >= 0 for value in values):
+            window, prompt, completion, reserve = values
+            memory_calls = max(1, int(context_capacity.get("memory_call_count", 1)))
+            other_calls = max(0, int(context_capacity.get("other_tool_call_count", 0)))
+            margin = max(0, int(configured.get("safety_margin_tokens", 1024)))
+            margin += max(0, int(configured.get("additional_safety_margin_tokens", 0)))
+            wrappers = max(0, int(configured.get("tool_result_wrapper_tokens", 128))) * memory_calls
+            other_results = max(0, int(configured.get("other_tool_result_reserve_tokens", 512))) * other_calls
+            live_available = max(0, (window - prompt - completion - reserve - margin - wrappers - other_results) // memory_calls)
+            # The configured safe_available_tokens is a fallback for unknown
+            # prompt occupancy, not a permanent ceiling on a live calculation.
+            available = live_available
+            reason = "usage_anchored_live_estimate"
+    hard_cap = int(configured.get("hard_token_cap", configured.get("token_budget", 1000)))
+    if token_budget is not None:
+        hard_cap = min(hard_cap, int(token_budget))
+    if safe_available_tokens is not None:
+        available = min(available, max(0, int(safe_available_tokens)))
+        reason = "caller_available_tokens" if reason.startswith("fallback") else reason
+    return max(0, min(int(budgets[detail]), available, hard_cap)), reason
+
 
 def profile_identity(home):
     return hashlib.sha256(hermes_home_key(home).encode()).hexdigest()
@@ -157,7 +193,14 @@ class MemdMemoryProvider(MemoryProvider):
             "endpoint": self._default_endpoint(),
             "namespace": "hermes",
             "top_k": 10,
-            "token_budget": 1000,
+            "token_budget": 4000,
+            "safe_available_tokens": 1000,
+            "detail_budgets": DETAIL_BUDGETS,
+            "minimum_utility_per_token": 0.0,
+            "safety_margin_tokens": 1024,
+            "additional_safety_margin_tokens": 0,
+            "tool_result_wrapper_tokens": 128,
+            "other_tool_result_reserve_tokens": 512,
             "daemon_path": str((target / binary).resolve()),
             "model_dir": str((target / "models" / "all-MiniLM-L6-v2").resolve()),
             "store_path": str((target / "memories.db").resolve()),
@@ -169,7 +212,7 @@ class MemdMemoryProvider(MemoryProvider):
             try:
                 previous = json.loads(path.read_text(encoding="utf-8-sig"))
                 preserved = {key: value for key, value in previous.items()
-                             if key in {"endpoint", "namespace", "top_k", "token_budget", "store_path"}}
+                             if key in {"endpoint", "namespace", "top_k", "token_budget", "store_path", "safe_available_tokens", "detail_budgets", "minimum_utility_per_token", "safety_margin_tokens", "additional_safety_margin_tokens", "tool_result_wrapper_tokens", "other_tool_result_reserve_tokens"}}
                 if "endpoint" in preserved:
                     endpoint_options(preserved["endpoint"])
                 provider_config.update(preserved)
@@ -291,12 +334,21 @@ class MemdMemoryProvider(MemoryProvider):
         return store.remember(record, {"session_id":session_id, "write_origin":"explicit_remember",
                                       "source_ref":source_reference(home,session_id,message_uid)}, target=target)
 
-    def recall(self, query, *, session_id="", token_budget=None, token_counter=None):
+    def recall(self, query, *, session_id="", token_budget=None, token_counter=None, detail="normal",
+               safe_available_tokens=None, context_capacity=None, token_counter_method=None,
+               include_superseded=False):
         _,_,config,scope,_ = self._binding(session_id)
         with MemdClient(**endpoint_options(config["endpoint"])) as client:
-            hits = client.retrieve(query,k=min(int(config.get("top_k",10)),100),scope=scope,mode="hybrid")
-            hits += client.retrieve(query,k=min(int(config.get("top_k",10)),100),scope={**scope,"namespace":scope["namespace"]+":user"},mode="hybrid")
-        return ContextBuilder(token_counter=token_counter).build(hits, token_budget=int(token_budget or config.get("token_budget",1000)))
+            hits = client.retrieve(query,k=min(int(config.get("top_k",10)),100),scope=scope,mode="hybrid",include_superseded=include_superseded)
+            hits += client.retrieve(query,k=min(int(config.get("top_k",10)),100),scope={**scope,"namespace":scope["namespace"]+":user"},mode="hybrid",include_superseded=include_superseded)
+        effective, reason = _resolve_budget(detail, config, token_budget, safe_available_tokens, context_capacity)
+        builder = ContextBuilder(token_counter=token_counter,
+                                 minimum_utility_per_token=float(config.get("minimum_utility_per_token", 0.0)),
+                                 token_counter_method=token_counter_method)
+        if effective == 0:
+            return builder.empty_package(len(hits), detail=detail, budget_reason=reason)
+        return builder.build(hits, token_budget=effective, detail=detail, budget_reason=reason,
+                             include_superseded=include_superseded)
 
     def shutdown(self):
         self._sessions.pop(hermes_home_key(),None)
@@ -307,14 +359,18 @@ class MemdMemoryProvider(MemoryProvider):
                      "action":{"type":"string","enum":["remember","recall","source","history"]},
                      "target":{"type":"string","enum":["memory","user"],"description":"For remember: user for persona/preferences, memory for environment/project facts (default). Use the same target as native memory to deduplicate."},
                      "record":{"type":"object","properties":{"content":{"type":"string"},"kind":{"type":"string","enum":["semantic","episodic"]},"tags":{"type":"array","items":{"type":"string"}}},"required":["content"]},
-                     "query":{"type":"string"},"source_ref":{"type":"string"}},"required":["action"]}}]
+                     "query":{"type":"string"},"detail":{"type":"string","enum":["brief","normal","deep","exhaustive"],"description":"Optional recall detail; defaults to normal."},"include_superseded":{"type":"boolean","description":"Include explicitly superseded records for historical questions."},"source_ref":{"type":"string"}},"required":["action"]}}]
 
     def handle_tool_call(self, tool_name, args, **kwargs):
         if tool_name != "memd_memory":
             raise ValueError("unknown memory tool")
         actions = {
             "remember":lambda: {"id":self.ingest_memory(args["record"], target=args.get("target") or "memory")},
-            "recall":lambda: {"context":self.recall(args["query"]).text},
+            "recall":lambda: {"context":self.recall(args["query"], detail=args.get("detail", "normal"),
+                                                       token_counter=kwargs.get("token_counter"),
+                                                       token_counter_method=kwargs.get("token_counter_method"),
+                                                       context_capacity=kwargs.get("context_capacity"),
+                                                       include_superseded=bool(args.get("include_superseded", False))).text},
             "source":lambda: self.resolve_source(args["source_ref"]),
             "history":lambda: self.search_sessions(args["query"]),
         }

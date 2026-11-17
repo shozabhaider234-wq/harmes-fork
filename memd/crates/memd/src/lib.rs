@@ -37,7 +37,12 @@ pub trait MemoryEngine: Send + Sync {
     fn inventory(&self, _scope: RetrievalScope) -> Result<Vec<MemoryRecord>, String> {
         Err("inventory unsupported by this backend".into())
     }
-    fn compare_exchange(&self, _scope: RetrievalScope, _expected: Vec<MemoryRecord>, _desired: Vec<MemoryRecord>) -> Result<bool, String> {
+    fn compare_exchange(
+        &self,
+        _scope: RetrievalScope,
+        _expected: Vec<MemoryRecord>,
+        _desired: Vec<MemoryRecord>,
+    ) -> Result<bool, String> {
         Err("conditional batch unsupported by this backend".into())
     }
     fn storage_stats(&self) -> Result<Value, String> {
@@ -59,6 +64,16 @@ pub trait MemoryEngine: Send + Sync {
     ) -> Result<Vec<MemoryHit>, String> {
         let _ = (query, k, scope, mode);
         Err("scoped retrieval is unsupported by this backend".into())
+    }
+    fn retrieve_scoped_with_options(
+        &self,
+        query: &str,
+        k: usize,
+        scope: RetrievalScope,
+        mode: RetrievalMode,
+        _include_superseded: bool,
+    ) -> Result<Vec<MemoryHit>, String> {
+        self.retrieve_scoped(query, k, scope, mode)
     }
     fn get_memory(&self, _id: &str) -> Result<Option<Value>, String> {
         Err("lookup unsupported by this backend".into())
@@ -152,6 +167,7 @@ fn parse_record(value: Value) -> Result<MemoryRecord, String> {
         "importance",
         "confidence",
         "expires_at",
+        "superseded_by",
     ] {
         if let Some(field) = value.get(key) {
             typed[key] = field.clone();
@@ -174,8 +190,15 @@ impl<B: EmbeddingBackend> MemoryEngine for MemCoreEngine<B> {
     fn inventory(&self, scope: RetrievalScope) -> Result<Vec<MemoryRecord>, String> {
         self.store.inventory(&scope).map_err(|e| e.to_string())
     }
-    fn compare_exchange(&self, scope: RetrievalScope, expected: Vec<MemoryRecord>, desired: Vec<MemoryRecord>) -> Result<bool, String> {
-        self.store.compare_exchange(&scope, &expected, &desired, &self.backend).map_err(|e| e.to_string())
+    fn compare_exchange(
+        &self,
+        scope: RetrievalScope,
+        expected: Vec<MemoryRecord>,
+        desired: Vec<MemoryRecord>,
+    ) -> Result<bool, String> {
+        self.store
+            .compare_exchange(&scope, &expected, &desired, &self.backend)
+            .map_err(|e| e.to_string())
     }
     fn storage_stats(&self) -> Result<Value, String> {
         serde_json::to_value(self.store.stats().map_err(|e| e.to_string())?)
@@ -209,6 +232,35 @@ impl<B: EmbeddingBackend> MemoryEngine for MemCoreEngine<B> {
     ) -> Result<Vec<MemoryHit>, String> {
         self.store
             .retrieve(query, &scope, k, mode, &self.backend)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|hit| {
+                Ok(MemoryHit {
+                    id: hit.record.entry.id.clone(),
+                    source_ref: hit.record.source_ref.clone(),
+                    score: hit.score as f32,
+                    entry: {
+                        let mut value =
+                            serde_json::to_value(&hit.record).map_err(|e| e.to_string())?;
+                        if let Some(distance) = hit.distance {
+                            value["vector_distance"] = json!(distance);
+                        }
+                        value
+                    },
+                })
+            })
+            .collect()
+    }
+    fn retrieve_scoped_with_options(
+        &self,
+        query: &str,
+        k: usize,
+        scope: RetrievalScope,
+        mode: RetrievalMode,
+        include_superseded: bool,
+    ) -> Result<Vec<MemoryHit>, String> {
+        self.store
+            .retrieve_with_options(query, &scope, k, mode, &self.backend, include_superseded)
             .map_err(|e| e.to_string())?
             .into_iter()
             .map(|hit| {
@@ -383,7 +435,12 @@ pub fn handle_request(request: Value, engine: &dyn MemoryEngine) -> Value {
             let Some(k) = request.get("k").and_then(Value::as_u64) else {
                 return error_response(id, "invalid_request", "k must be a non-negative integer");
             };
-            let result = if request.get("scope").is_some() || request.get("mode").is_some() {
+            let include_superseded = match request.get("include_superseded") {
+                None => false,
+                Some(Value::Bool(value)) => *value,
+                Some(_) => return error_response(id, "invalid_request", "include_superseded must be a boolean"),
+            };
+            let result = if request.get("scope").is_some() || request.get("mode").is_some() || include_superseded {
                 let scope = match serde_json::from_value(
                     request.get("scope").cloned().unwrap_or(json!({})),
                 ) {
@@ -396,7 +453,7 @@ pub fn handle_request(request: Value, engine: &dyn MemoryEngine) -> Value {
                     Ok(mode) => mode,
                     Err(e) => return error_response(id, "invalid_request", &e.to_string()),
                 };
-                engine.retrieve_scoped(query, k.min(100) as usize, scope, mode)
+                engine.retrieve_scoped_with_options(query, k.min(100) as usize, scope, mode, include_superseded)
             } else {
                 engine.retrieve(query, k.min(100) as usize)
             };
@@ -656,19 +713,50 @@ mod tests {
                     json!({"entry": {"id":"garden-1", "content":"Tomatoes need sunlight and water"}}),
                 ),
                 request(
+                    "s3",
+                    "store",
+                    json!({"entry": {"id":"location-current", "content":"current server address is west"}}),
+                ),
+                request(
+                    "s4",
+                    "store",
+                    json!({"entry": {"id":"location-old", "content":"old server address was east", "superseded_by":"location-current", "source_ref":"hermes://profile/sessions/s1"}}),
+                ),
+                request(
                     "r1",
                     "retrieve",
                     json!({"query":"Cargo Rust project", "k":5}),
+                ),
+                request(
+                    "r2",
+                    "retrieve",
+                    json!({"query":"old server address", "k":5, "scope":{}, "mode":"keyword"}),
+                ),
+                request(
+                    "r3",
+                    "retrieve",
+                    json!({"query":"old server address", "k":5, "scope":{}, "mode":"keyword", "include_superseded":true}),
                 ),
             ],
         );
         assert_eq!(stored[0]["result"]["id"], "rust-1");
         assert_eq!(stored[1]["result"]["id"], "garden-1");
-        assert_eq!(stored[2]["result"]["hits"][0]["id"], "rust-1");
+        assert_eq!(stored[4]["result"]["hits"][0]["id"], "rust-1");
         assert_eq!(
-            stored[2]["result"]["hits"][0]["source_ref"],
+            stored[4]["result"]["hits"][0]["source_ref"],
             "session_12:turn_40"
         );
+        assert!(stored[5]["result"]["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|hit| hit["id"] != "location-old"));
+        assert!(stored[6]["result"]["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hit| hit["id"] == "location-old"
+                && hit["entry"]["superseded_by"] == "location-current"));
         drop(engine);
 
         let reopened = Arc::new(MemCoreEngine::open(&path, TestBackend).unwrap());

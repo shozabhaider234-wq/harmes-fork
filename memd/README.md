@@ -6,6 +6,18 @@ memory persistence. Existing Markdown is preserved for explicit migration/rollba
 
 Local Rust memory core (`crates/memcore`) and IPC daemon (`crates/memd`).
 
+The existing opt-in Python Hermes bridge supports adaptive `brief`/`normal`/
+`deep`/`exhaustive` recall ceilings and optional low-utility omission. See
+[integration details](INTEGRATION.md#the-memd_memory-provider-tool-supports) for
+configuration and the current conservative fallback limits. A reproducible
+synthetic context-packing comparison is available at
+`python memd/scripts/benchmark_context_builder.py`.
+Hermes uses cached provider usage plus its cached model context limit for live
+budgeting, then validates the API-copy prompt before send. Exact provider tokenizers
+are not currently exposed to this integration, so diagnostics report a padded
+Hermes estimate. Explicit supersession and historical retrieval are described in
+[the integration guide](INTEGRATION.md#live-context-budget-and-historical-retrieval).
+
 ## Embedding Model Setup
 
 **Prerequisite:** Rust `>= 1.92` (`rustup update stable`, or install via `https://sh.rustup.rs`).
