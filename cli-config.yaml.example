@@ -990,6 +990,11 @@ prompt_caching:
 #     enabled: true            # false = skip automatic forks (/refine still works)
 #     provider: "auto"         # or pin a cheaper model (see memory.md)
 #     model: ""
+#     scheduling_mode: auto    # auto | concurrent | idle; unknown capacity uses idle
+#     max_concurrency: 1       # reviews per profile/runtime endpoint (1..8)
+#     max_retries: 3           # retries AFTER the initial attempt
+#     retry_backoff_s: 5       # exponential backoff, jittered between half and full delay
+#     retry_backoff_max_s: 300 # upper bound on retry delay
 
 # =============================================================================
 # Persistent Memory

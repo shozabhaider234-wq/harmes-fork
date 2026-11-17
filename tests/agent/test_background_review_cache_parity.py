@@ -12,6 +12,15 @@ Sonnet 4.5 per the contributor's measurement).
 """
 
 from unittest.mock import patch
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def execute_review_inline(monkeypatch):
+    from run_agent import AIAgent
+    from agent.review_scheduler import SCHEDULER
+    monkeypatch.setattr(SCHEDULER, "enqueue", lambda agent, messages_snapshot, **kw:
+                        AIAgent._spawn_background_review_now(agent, messages_snapshot, **kw))
 
 
 def _make_agent_stub(agent_cls):

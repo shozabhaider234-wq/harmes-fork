@@ -68,7 +68,7 @@ def test_background_review_matches_parent_toolset_config():
 
     with patch.object(run_agent.AIAgent, "__init__", _capture_init), \
          patch("threading.Thread", _SyncThread):
-        agent._spawn_background_review(
+        agent._spawn_background_review_now(
             messages_snapshot=[],
             review_memory=True,
             review_skills=False,
@@ -114,7 +114,7 @@ def test_background_review_installs_thread_local_whitelist():
     with patch.object(run_agent.AIAgent, "__init__", _no_init), \
          patch.object(_plugins, "set_thread_tool_whitelist", _capture_whitelist), \
          patch("threading.Thread", _SyncThread):
-        agent._spawn_background_review(
+        agent._spawn_background_review_now(
             messages_snapshot=[],
             review_memory=True,
             review_skills=False,
@@ -254,7 +254,7 @@ def test_background_review_whitelist_includes_configured_extra_tools(
          patch.object(run_agent.AIAgent, "close", lambda self: None), \
          patch.object(_plugins, "set_thread_tool_whitelist", _capture_whitelist), \
          patch("threading.Thread", _SyncThread):
-        agent._spawn_background_review(
+        agent._spawn_background_review_now(
             messages_snapshot=[],
             review_memory=True,
             review_skills=False,

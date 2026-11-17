@@ -38,6 +38,8 @@ class TurnFacadeMixin:
         from agent.background_review import cancel_background_review_for_live_turn
 
         cancel_background_review_for_live_turn(self)
+        from agent.review_scheduler import SCHEDULER
+        review_schedule_token = None
 
         from agent import relay_runtime
         from agent.aux_accounting import reset_accounting_context, set_accounting_context
@@ -49,7 +51,6 @@ class TurnFacadeMixin:
         )
         from agent.prompt_cache_scope import declared_conversation_scope_safe
         from agent.relay_cwd import resolve_relay_scope_cwds
-        from agent.review_idle_queue import QUEUE as _review_queue
         from agent.subagent_lifecycle import bind_subagent_parent
         from agent.interrupt_scope import track_in_interrupt_scope
         from agent.turn_facade_lease import admit_durable_turn_lease, carry_unadmitted_user_message
@@ -77,8 +78,7 @@ class TurnFacadeMixin:
         relay_outcome = "failed"
 
         try:
-            # First statement of the try so the finally's note_turn_finished balances every exit.
-            _review_queue.note_turn_started()
+            review_schedule_token = SCHEDULER.turn_started(self)
             admission = admit_durable_turn_lease(
                 self, session_id=session_id, relay_turn_id=relay_turn_id, task_context=task_context,
                 conversation_history=conversation_history,
@@ -211,9 +211,8 @@ class TurnFacadeMixin:
                         reset_conversation_context(token)
                     if affinity_token is not None:
                         reset_affinity_scope(affinity_token)
-                    # Balance note_turn_started so the idle queue's live-turn count cannot leak.
                     with suppress(Exception):
-                        _review_queue.note_turn_finished()
+                        SCHEDULER.turn_finished(review_schedule_token)
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:
         """Final response string of one turn; ``stream_callback`` receives each text delta."""

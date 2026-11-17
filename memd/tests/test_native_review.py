@@ -146,15 +146,16 @@ def test_real_native_review_pipeline(runtime, monkeypatch, save):
     monkeypatch.setattr("agent.process_bootstrap.OpenAI", lambda **k: model)
     captured = []
     queued = []
-    real_thread = run_agent.threading.Thread
-    class ReviewThread:
-        def __init__(self, *, target, **kwargs):
-            self.target = target
-        def start(self):
-            queued.append(self.target)
-    def thread_factory(*a, **k):
-        return ReviewThread(**k) if k.get("name") == "bg-review" else real_thread(*a, **k)
-    monkeypatch.setattr(run_agent.threading, "Thread", thread_factory)
+    from agent.review_scheduler import ReviewScheduler
+    scheduler = ReviewScheduler()
+    monkeypatch.setattr("agent.review_scheduler.SCHEDULER", scheduler)
+    monkeypatch.setattr(scheduler, "_ensure_thread", lambda: None)
+    real_enqueue = scheduler.enqueue
+    def enqueue(*a, **k):
+        job_id = real_enqueue(*a, **k)
+        queued.append(job_id)
+        return job_id
+    monkeypatch.setattr(scheduler, "enqueue", enqueue)
     def complete(**kwargs):
         captured.append(copy.deepcopy(kwargs["messages"]))
         review = "Review the conversation above" in str(kwargs["messages"][-1].get("content", ""))
@@ -184,7 +185,12 @@ def test_real_native_review_pipeline(runtime, monkeypatch, save):
     second = parent.run_conversation("Please continue", conversation_history=first["messages"])
     assert parent._turns_since_memory == 0 and len(queued) == 1
     prompt = parent._cached_system_prompt
-    queued.pop()()
+    job_id = queued.pop()
+    profile = scheduler._profile(parent)
+    assert profile.jobs.claim(scheduler.owner) == job_id
+    from agent.background_review import _BackgroundReviewRun
+    scheduler._execute(profile, profile.jobs.get(job_id, snapshot=True), _BackgroundReviewRun())
+    assert profile.jobs.get(job_id)["status"] == "completed"
     assert parent._cached_system_prompt == prompt
     review_requests = [messages for messages in captured if "Review the conversation above" in str(messages)]
     assert len(review_requests) == (2 if save else 1)
@@ -213,3 +219,18 @@ def test_real_native_review_pipeline(runtime, monkeypatch, save):
     assert not json.loads(results[-1]["content"])["success"]
     assert parent._turns_since_memory == 0
     parent.release_clients()
+    scheduler.close()
+
+
+def test_native_review_receipt_survives_lost_response_and_foreground_edit(runtime):
+    from tools.memory_tool import load_on_disk_store
+    store = load_on_disk_store()
+    receipt = {"review_job_id": "durable-job", "review_operation_id": "operation-1"}
+    with store.write_context(receipt):
+        assert store.add("user", "User prefers Rust")["success"]
+    # A response was lost after committing. Meanwhile foreground updates that entry.
+    assert store.replace("user", "User prefers Rust", "User prefers concise Rust")["success"]
+    restarted = load_on_disk_store()
+    with restarted.write_context(receipt):
+        assert restarted.add("user", "User prefers Rust")["success"]
+    assert load_on_disk_store().user_entries == ["User prefers concise Rust"]

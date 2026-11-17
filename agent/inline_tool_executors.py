@@ -142,9 +142,24 @@ def _session_search(agent, args: dict, ctx: InlineToolContext) -> Any:
 def _memory(agent, args: dict, ctx: InlineToolContext) -> Any:
     from contextlib import nullcontext
     write_context = getattr(agent._memory_store, "write_context", None)
-    binding = write_context(agent._build_memory_write_metadata(
+    metadata = agent._build_memory_write_metadata(
         task_id=ctx.effective_task_id, tool_call_id=ctx.tool_call_id,
-    )) if write_context else nullcontext()
+    ) if write_context else {}
+    scheduled_job = getattr(agent, "_scheduled_review_job", None)
+    if scheduled_job:
+        import hashlib
+        jobs, job_id, owner = scheduled_job
+        if not jobs.owned(job_id, owner):
+            raise RuntimeError("Background review lease expired")
+        metadata["review_job_id"] = job_id
+        operation = {key: args.get(key) for key in ("action", "content", "old_text", "new_text", "operations")}
+        operation["target"] = args.get("target", "memory")
+        if isinstance(operation["content"], str):
+            operation["content"] = operation["content"].strip()
+        metadata["review_operation_id"] = hashlib.sha256(
+            json.dumps([job_id, operation], sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()
+    binding = write_context(metadata) if write_context else nullcontext()
     with binding:
         result = _call_tool(
             "tools.memory_tool", "memory_tool", args,
@@ -154,6 +169,10 @@ def _memory(agent, args: dict, ctx: InlineToolContext) -> Any:
             ),
             store=agent._memory_store,
         )
+    if scheduled_job:
+        data = json.loads(result) if isinstance(result, str) else result
+        if isinstance(data, dict) and str(data.get("error", "")).startswith("Rust memory persistence failed:"):
+            agent._scheduled_review_failure = ConnectionError("Native memory persistence failed")
     # Mirror built-in memory writes to external providers; gating lives in
     # MemoryManager.notify_memory_tool_write.
     if agent._memory_manager:

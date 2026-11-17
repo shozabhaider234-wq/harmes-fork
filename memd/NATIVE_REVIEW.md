@@ -126,8 +126,8 @@ fail visibly rather than silently inserting or overwriting another ID.
 Native tool operation results, matching, threat scans, budgets, approvals and
 consolidation failure limits are inherited from MemoryStore. Only persistence is
 replaced. Conditional commits return an explicit conflict rather than adding a new
-automatic extraction retry policy. Native scheduling/cancellation/requeue behavior
-is untouched. Pending approvals still live in the existing approval store.
+automatic extraction retry policy in the Rust engine. Automatic reviews now use
+the durable scheduler below. Pending approvals still live in the existing approval store.
 
 Prompt memory remains a frozen load-time snapshot; new memories do not mutate an
 active conversation's prefix. A new session reads Rust. Explicit recall still
@@ -146,6 +146,154 @@ The local daemon transport is the trust boundary; namespace filters do not repla
 authentication. Native inventory is intentionally for curated, character-bounded
 memory, not a large transcript database. No Unix/MSVC production certification or
 extraction token savings are implied by Windows GNU tests.
+
+## Durable automatic review scheduling
+
+Automatic reviews use the same scheduler for cloud, OAuth, API-key and local
+runtimes. No model-specific scheduler or additional LLM call is introduced.
+The historical audit above describes the previous in-memory scheduling path.
+
+Configure the existing `auxiliary.background_review` block in the active
+profile's `config.yaml`:
+
+```yaml
+auxiliary:
+  background_review:
+    enabled: true
+    provider: auto
+    model: ""
+    scheduling_mode: auto
+    max_concurrency: 1
+    max_retries: 3
+    retry_backoff_s: 5
+    retry_backoff_max_s: 300
+```
+
+`auto` selects idle scheduling when runtime concurrency capability is unknown.
+Hermes currently exposes no universal concurrency-capability contract, so this
+is conservative for every provider, including cloud providers. `concurrent`
+allows foreground and background execution together; `idle` defers while the
+owning profile has active foreground work. Models/provider aliases on
+one endpoint share capacity. Review concurrency is enforced per profile/endpoint
+across processes, with at most eight review workers per process. The existing
+managed-local `/slots` idle check is retained. A busy server defers admission
+without consuming an attempt. Legacy `defer: never` maps `auto` to concurrent;
+an explicit `scheduling_mode` wins. The old age-out override is removed: waiting
+long enough must not override foreground priority. Explicit `/refine` retains
+its existing immediate, attended execution path.
+
+The flow is:
+
+1. Existing nudge intervals and finalization eligibility decide whether a review
+   is due. An eligible automatic review commits its immutable conversation
+   snapshot to `<profile home>/review_queue.sqlite3` before dispatch.
+2. Jobs carry a unique ID, session identity, native memory/skill scope, provider
+   and model selectors, runtime scope hash, timestamps, attempt count, retry
+   policy, status and next execution deadline. The containing database supplies
+   profile identity. No runtime credentials, OAuth tokens, credential pools or
+   authentication headers are serialized. Snapshots contain conversation data
+   and should receive the same protection and backup policy as session history.
+3. SQLite transactions atomically claim jobs and enforce capacity and one active
+   review per session. Workers load snapshots only after claiming. A 90-second
+   lease is renewed every five seconds while work is active. Expired running
+   jobs become retry-pending; late completions cannot overwrite a newer claim.
+4. Reviews queued in the current process retain the live runtime. Recovered
+   jobs rebuild their runtime through the existing Hermes provider resolver
+   using the owning profile's durable provider configuration, credential pools,
+   OAuth/auth stores, `.env`, external secret sources and command credential
+   mechanisms. Each execution binds the database's profile home and rebuilds
+   its secret/terminal scopes; a captured credential mapping or a newly resumed
+   foreground session cannot substitute its credentials for recovery. Named
+   custom provider identities are retained instead of only the resolved
+   `custom` class. A non-secret process identity distinguishes live from
+   recovered jobs and is excluded from duplicate-job detection. No access
+   tokens or credentials are copied into jobs. Agent initialization reattaches
+   existing queues; unopened profiles remain dormant. Credentials/endpoints
+   supplied only as transient session overrides must have a durable profile
+   configuration to be available after process exit.
+5. A new foreground turn immediately signals preemption for an idle review;
+   it does not wait for the LLM request to finish. Concurrent reviews continue
+   within their review limit. A preempted job remains leased until its worker
+   exits, then becomes retry-pending. A provider that cannot abort its request
+   may continue consuming resources until its normal request timeout.
+6. Interruptions and classified transient transport/provider failures retry
+   with exponential backoff and jitter between half and the bounded full delay.
+   The default is one initial attempt plus three retries. Configuration/auth
+   errors and exhausted jobs remain `permanently-failed` for diagnosis. A
+   successful review that saves nothing becomes `completed`.
+
+Native prompts, validation, approval gates, memory CAS operations, frozen prompt
+memory and auxiliary usage attribution are retained. Scheduled memory calls
+check lease ownership before dispatch. Rust memory updates include an operation
+receipt derived from job ID and canonical native-tool arguments, committed in
+the same existing Rust CAS as the write. Replaying that operation after a lost
+reply does not repeat the write, including after a foreground edit. Existing
+exact-content dedup remains active. This protects repeated operations, not
+semantic paraphrases generated by a nondeterministic model. Unattended
+destructive operations continue to be staged through existing approval logic.
+
+Structured `memory_review` log events include queued, started, completed,
+preempted, recovered, retried and permanently_failed, with job/profile identity,
+queue length, attempt/retry count, duration and available token counters. The
+existing reviewer also logs provider usage and records it against the parent
+session. Queue errors store exception classes or Hermes failure reasons rather
+than raw provider responses, which can contain credentials.
+
+For diagnostics, inspect this profile-local database with SQLite, for example:
+
+```sql
+SELECT id, session_id, status, attempts, created_at, updated_at,
+       next_at, lease_until, error, usage
+FROM review_jobs ORDER BY created_at DESC LIMIT 50;
+```
+
+Terminal jobs and snapshots are retained for diagnostics; no automatic retention
+cleanup is currently performed. Do not edit running job rows. Queue claims and
+foreground leases coordinate processes sharing one profile database; independent
+profile databases do not coordinate capacity for a shared physical endpoint.
+Choose conservative profile limits when sharing a constrained server.
+
+### Scheduler implementation files
+
+| File | Purpose |
+| --- | --- |
+| `agent/review_jobs.py` | Profile-local SQLite jobs, immutable snapshots, atomic claims, foreground/review leases, retry policy and structured events. |
+| `agent/review_scheduler.py` | Bounded provider-independent dispatch, foreground priority, captured profile contexts and runtime recovery. |
+| `agent/background_review.py` | Expose completion/failure/usage outcomes from the existing reviewer and pass the durable job binding to its native tools. |
+| `agent/review_idle_queue.py` | Retain managed-local probes; remove the superseded volatile queue. |
+| `agent/turn_facade.py` | Balance foreground admission and completion around every turn exit. |
+| `run_agent.py` | Attach queues at initialization, persist automatic triggers and retain immediate explicit reviews. |
+| `agent/inline_tool_executors.py` | Fence expired jobs before native memory dispatch and derive operation receipt IDs. |
+| `memd/clients/python/native_store.py` | Recognize receipts committed atomically with existing Rust memory updates. |
+| `hermes_cli/config_defaults.py` | Register scheduling, concurrency and retry defaults. |
+| `cli-config.yaml.example` | Document configuration examples. |
+| `website/docs/user-guide/features/memory.md` | Replace obsolete volatile-queue guidance with durable scheduling and diagnostics. |
+| `memd/NATIVE_REVIEW.md` | Document integration, recovery, operational limits and validation. |
+| `tests/agent/test_review_scheduler.py` | Deterministic scheduling, retries, recovery, provider, concurrency and profile/session isolation contracts. |
+| `tests/agent/test_review_idle_queue.py` | Retain the managed-local probe contract; superseded queue contracts move to the durable scheduler tests. |
+| `tests/agent/test_background_review.py` | Isolate existing reviewer execution/explicit-cancellation tests from long-lived dispatch. |
+| `tests/agent/test_background_review_cache_parity.py` | Keep cache-parity tests focused on the existing fork executor. |
+| `tests/agent/test_background_review_toolset_restriction.py` | Exercise the fork executor directly when checking its tool surface. |
+| `memd/tests/test_native_review.py` | Exercise durable admission through real foreground/review loops and Rust persistence, including replay after a lost response and foreground edit. |
+
+### Scheduler validation (2026-11-17)
+
+The focused regression run used `scripts/run_tests.sh`, the existing PM-isolated
+Python 3.14.7 test environment, deterministic fake models, and the real local Rust
+daemon: **14 files, 110 tests passed, 0 failed**. It covers scheduler contracts,
+native memory persistence, reviewer execution/cache parity, provider routing,
+input budgets, tool restrictions, usage accounting, native dispatch arguments,
+disabled reviews and session-store isolation. No paid model API was called.
+This is a focused suite, not a full-repository test result.
+
+Restart credential recovery was subsequently verified with **6 files, 158 tests
+passed, 0 failed** through the same canonical runner. This includes the real
+provider-resolution suite, Rust-native reviews, review routing/cache/usage
+contracts, and 23 scheduler tests. New integration cases exercise real durable
+named-provider configuration and rotated profile credentials across A→B→A,
+including alternate review models and a resumed foreground session carrying
+unrelated credentials. They verify that credential values do not appear in the
+queue database and that process identity does not defeat job deduplication.
 
 ## Validation and measurements (2026-11-16)
 

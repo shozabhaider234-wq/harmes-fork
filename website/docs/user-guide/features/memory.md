@@ -445,37 +445,62 @@ and tools not listed here remain denied. Keep the list narrow and prefer tools
 that stage a proposal for human review rather than applying external or
 destructive changes directly. The default is an empty list.
 
-### Local models: reviews wait for an idle GPU (`defer`)
+### Durable background review scheduling
 
-On a cloud provider the review finishes in seconds and runs alongside
-whatever you do next. When the review's runtime is the **managed local
-llama-server** (Settings → Local models), the same fork occupies the GPU your
-next prompt needs — for minutes on a large model — and sending a new prompt
-cancels it, discarding the learning. So on the managed local runtime, reviews
-are **deferred by default**: queued at turn end and executed once the machine
-has been quiet for a short settle window. Nothing about the review itself
-changes — same model, same full-transcript replay, same writes — only the
-execution moment moves.
+Automatic reviews enter a persistent, profile-local SQLite queue for every
+provider: cloud, local, OAuth and API-key runtimes. A new foreground prompt
+can preempt a review without discarding its job. Existing review prompts,
+native memory validation, routing and usage accounting remain in use.
 
 ```yaml
 auxiliary:
   background_review:
-    defer: auto            # auto (default) | never
-    defer_max_age_s: 1800  # run a queued review anyway after this long
+    scheduling_mode: auto
+    max_concurrency: 1
+    max_retries: 3
+    retry_backoff_s: 5
+    retry_backoff_max_s: 300
 ```
 
 | Value | Behaviour |
 |-------|-----------|
-| `auto` (default) | Reviews whose runtime resolves to the managed local server are queued and run at idle; every other runtime (cloud, external servers) spawns immediately as before. |
-| `never` | Old behavior everywhere: spawn immediately at turn end, even on the managed local GPU. |
+| `auto` (default) | Use idle scheduling when the runtime's concurrency capacity is unknown. This currently applies to all providers. |
+| `concurrent` | Allow reviews alongside foreground work, within the configured review concurrency limit. |
+| `idle` | Wait until foreground work in the owning profile finishes; also check managed-local server idleness. |
 
-Queued reviews coalesce per session (a newer turn's snapshot replaces the
-older one — the review replays the whole conversation, so nothing is lost),
-a review preempted by a new prompt is re-queued instead of discarded, and a
-review that has waited longer than `defer_max_age_s` runs even if the machine
-never goes idle. Explicit `/refine` always runs immediately. The queue is
-in-memory: reviews still pending when the app exits are dropped, same as an
-in-flight fork would have been.
+The default limit is one review per profile/runtime endpoint, across processes
+sharing that profile. At most eight review workers run in one process. Jobs
+from one session never execute simultaneously. Separate profile databases do
+not share capacity limits, so configure conservatively when sharing a GPU.
+
+The default retry policy permits an initial attempt plus three retries for
+interruptions and transient failures, with bounded exponential backoff and
+jitter. Configuration/authentication errors and exhausted jobs remain visible
+as permanently failed. A successful review that saves nothing is completed.
+Rust native memory writes carry atomic operation receipts to prevent replay of
+committed writes after a lost response; exact-content deduplication also remains.
+
+Jobs survive restart and resume when an agent opens their profile. Recovery
+reconstructs the runtime from that profile's durable provider configuration
+and existing credential mechanisms, including OAuth/auth stores, credential
+pools, `.env`, external secrets and command credentials. Its profile secret
+scope is rebuilt at execution so rotated credentials take effect; a resumed
+foreground session's credentials are not substituted. Queue records store
+provider identities and model selectors, without access tokens. Settings that
+exist only as transient session overrides need a durable profile configuration
+to survive process exit. Non-abortable provider requests may continue until their
+normal timeout after preemption; the foreground turn does not wait for them.
+
+The queue is `<active profile home>/review_queue.sqlite3`. Structured
+`memory_review` events in the logs report queue length, attempts, duration and
+available token usage. For diagnostics, inspect `review_jobs` columns `id`,
+`session_id`, `status`, `attempts`, `error`, `next_at`, `lease_until` and `usage`
+with SQLite. Completed and permanently failed jobs are retained.
+
+Legacy `defer: never` selects concurrent scheduling when `scheduling_mode` is
+`auto`; an explicit scheduling mode takes precedence. The old age-out override
+is removed so waiting does not bypass foreground priority. Explicit `/refine`
+retains immediate attended execution.
 
 ## Controlling skill writes (`skills.write_approval`)
 

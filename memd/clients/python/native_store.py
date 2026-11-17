@@ -102,6 +102,11 @@ class RustMemoryStore(MemoryStore):
                 with MemdClient(**self.endpoint) as client:
                     records = client.inventory(self._scope(target))
                     self._set_entries(target, list(dict.fromkeys(r["content"] for r in records)))
+                    operation = self._provenance.get().get("review_operation_id")
+                    if operation and any(r.get("metadata", {}).get("review_operation_id") == operation for r in records):
+                        # The receipt was committed in the SAME Rust CAS as the memory. A lost
+                        # response or process crash cannot replay an already committed operation.
+                        return self._success_response(target, None)
                     result = mutate(self._entries_for(target), self._char_limit(target))
                     if isinstance(result, dict):
                         return result

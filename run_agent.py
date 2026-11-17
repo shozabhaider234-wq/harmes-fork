@@ -196,16 +196,6 @@ def _positive_int(value: Any) -> Optional[int]:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
-def _review_should_defer(agent: Any, task_cfg: Optional[Dict[str, Any]]) -> bool:
-    """True when an automatic background review targets the managed local runtime under ``defer: auto``."""
-    from agent.review_idle_queue import defer_mode, review_targets_managed_local
-    return defer_mode(task_cfg) == "auto" and review_targets_managed_local(agent, task_cfg)
-
-
-def _review_queue_key(agent: Any) -> str:
-    return str(getattr(agent, "session_id", None) or id(agent))
-
-
 def _notify_context_engine_session_end(agent: Any, messages: Optional[list]) -> None:
     """Tell the context engine the session ended (flush DAG, close DBs) at the same lifecycle moment as the
     memory manager, so per-session engine state never leaks into the next session."""
@@ -310,6 +300,9 @@ class AIAgent(
                           "no longer sleep between executions.", DeprecationWarning, stacklevel=2)
         from agent.agent_init import init_agent
         init_agent(self, **init_kwargs)
+        if not skip_memory and not skip_background_review:
+            from agent.review_scheduler import SCHEDULER
+            SCHEDULER.attach(self)
 
     def _get_session_db_for_recall(self):
         """SessionDB for recall, opening the default state DB when no ``session_db`` was passed so the
@@ -783,12 +776,7 @@ class AIAgent(
 
     def _spawn_background_review(self, messages_snapshot: List[Dict], review_memory: bool = False,
                                  review_skills: bool = False, focus: Optional[str] = None, explicit: bool = False) -> None:
-        """Post-turn review entry point: decide WHEN, then spawn.
-
-        A review whose runtime is the MANAGED LOCAL llama-server is queued for machine idle (``defer: auto``)
-        instead of hitting the user's GPU mid-session; everything else spawns immediately. ``explicit``
-        (/refine) is never deferred but does not touch the ``focus``-keyed delegate/enabled gates.
-        """
+        """Persist automatic reviews; explicit /refine retains immediate execution."""
         # Gates run at enqueue/spawn time; the idle dispatcher re-checks `enabled` at dispatch time.
         if focus is None and getattr(self, "_delegate_depth", 0) > 0:
             return
@@ -804,26 +792,26 @@ class AIAgent(
         # Structural clone at the single chokepoint every review path (automatic, /refine, idle-queue
         # deferral) goes through. See #100795.
         from agent.turn_finalizer import _clone_background_review_messages
+        if focus is None and not explicit:
+            from agent.review_scheduler import SCHEDULER
+            SCHEDULER.enqueue(self, messages_snapshot, review_memory=review_memory,
+                              review_skills=review_skills, task_cfg=task_cfg)
+            return
         kwargs = dict(messages_snapshot=_clone_background_review_messages(messages_snapshot),
                       review_memory=review_memory, review_skills=review_skills, focus=focus, task_cfg=task_cfg,
                       explicit=explicit)
-        if focus is None and not explicit and _review_should_defer(self, task_cfg):
-            from agent.review_idle_queue import QUEUE
-            QUEUE.enqueue(self, _review_queue_key(self), kwargs)
-            return
         self._spawn_background_review_now(**kwargs)
 
     def _spawn_background_review_now(self, messages_snapshot: List[Dict], review_memory: bool = False,
                                      review_skills: bool = False, focus: Optional[str] = None,
-                                     task_cfg: Optional[Dict[str, Any]] = None, _requeue_attempts: int = 0,
+                                     task_cfg: Optional[Dict[str, Any]] = None,
                                      explicit: bool = False) -> None:
         """Spawn the background memory/skill review thread.
 
         ``threading.Thread`` is constructed here so tests patching ``run_agent.threading.Thread`` keep working.
         ``focus`` is /refine steering text; ``task_cfg`` is the pre-loaded config block (None on direct calls).
         ``explicit`` (/refine) forks under the ``refine_review`` write origin, keeping the full
-        memory operation set. A deferred review preempted by a live turn is requeued (bounded)
-        rather than lost.
+        memory operation set. Automatic reviews execute through review_scheduler instead.
         """
         from agent.background_review import (
             finish_background_review_run, prepare_background_review_run, spawn_background_review_thread,
@@ -839,42 +827,12 @@ class AIAgent(
                 focus=focus, task_cfg=task_cfg, review_run=review_run, explicit=explicit,
             )
 
-            def _target_with_requeue() -> None:
-                target()
-                self._maybe_requeue_preempted_review(review_run, dict(
-                    messages_snapshot=messages_snapshot, review_memory=review_memory, review_skills=review_skills,
-                    focus=focus, task_cfg=task_cfg, _requeue_attempts=_requeue_attempts + 1,
-                    explicit=explicit))
-
             # Carry the active profile into the review thread so MEMORY.md / skill review writes land in the
             # right profile.
-            threading.Thread(target=propagate_context_to_thread(_target_with_requeue), daemon=True, name="bg-review").start()
+            threading.Thread(target=propagate_context_to_thread(target), daemon=True, name="bg-review").start()
         except Exception:
             finish_background_review_run(self, review_run)
             raise
-
-    _REVIEW_REQUEUE_MAX_ATTEMPTS = 3
-
-    def _maybe_requeue_preempted_review(self, review_run, kwargs) -> None:
-        """Requeue a deferred-mode review that a live turn cancelled.
-
-        Only for automatic reviews on the managed local runtime; bounded attempts stop a busy box cycling
-        forever.
-        """
-        try:
-            # Not cancelled == ran to completion (or was never admitted).
-            if not review_run.cancel_requested.is_set() or kwargs.get("focus") is not None:
-                return
-            if kwargs.get("_requeue_attempts", 0) > self._REVIEW_REQUEUE_MAX_ATTEMPTS:
-                logger.info("Preempted background review dropped after %d requeues", self._REVIEW_REQUEUE_MAX_ATTEMPTS)
-                return
-            if not _review_should_defer(self, kwargs.get("task_cfg")):
-                return
-            from agent.review_idle_queue import QUEUE
-            # kwargs carries the incremented _requeue_attempts through the queue so the cap survives.
-            QUEUE.enqueue(self, _review_queue_key(self), dict(kwargs))
-        except Exception:  # noqa: BLE001 — requeue is best-effort
-            logger.debug("Preempted-review requeue failed", exc_info=True)
 
     _build_memory_write_metadata = _forward("agent.background_review", "build_memory_write_metadata")
     _apply_pending_steer_to_tool_results = _forward("agent.agent_runtime_helpers", "apply_pending_steer_to_tool_results")

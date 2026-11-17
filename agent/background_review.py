@@ -34,6 +34,9 @@ class _BackgroundReviewRun:
         self._lock = threading.Lock()
         self._review_agent = None
         self._request_finished = self._cancel_dispatched = False
+        self.error = None
+        self.transient = False
+        self.usage = {}
 
     def begin_request(self, review_agent: Any) -> bool:
         """Atomically admit the first provider-capable review phase."""
@@ -1133,6 +1136,7 @@ class _ReviewForkState:
     review_agent: Any = None
     review_messages: List[Dict] = field(default_factory=list)
     review_usage: Dict[str, Any] = field(default_factory=dict)
+    result: Dict[str, Any] = field(default_factory=dict)
 
 
 def _release_fork_clients(review_agent: Any) -> None:
@@ -1154,7 +1158,10 @@ def _run_review_fork(
     attended, so the unattended-only memory delete gate leaves the full operation set available."""
     st.review_agent, _rt, _routed = build_cache_parity_fork(
         agent, task_cfg, max_iterations=_REVIEW_MAX_ITERATIONS)
+    if not _parent_can_emit_tool_calls(st.review_agent):
+        raise ValueError("Review runtime cannot emit Hermes tool calls")
     st.review_agent._review_attended = explicit
+    st.review_agent._scheduled_review_job = getattr(agent, "_scheduled_review_job", None)
     _track_review_fork(agent, st.review_agent, register=True)
     from hermes_cli.plugins import set_thread_tool_whitelist, clear_thread_tool_whitelist
     review_whitelist, configured_extra_tools = _review_tool_whitelist(st.review_agent, task_cfg, review_memory)
@@ -1181,7 +1188,7 @@ def _run_review_fork(
     try:
         if review_run is None or review_run.begin_request(st.review_agent):
             # Routed -> digest (cache cold anyway); same model -> full snapshot (warm cache reads).
-            st.review_agent.run_conversation(
+            st.result = st.review_agent.run_conversation(
                 user_message=(
                     prompt + "\n\nYou can only call " + memory_phrase_prompt +
                     "management tools. Other tools will be denied "
@@ -1189,6 +1196,8 @@ def _run_review_fork(
                 ),
                 conversation_history=_digest_history(messages_snapshot) if _routed else messages_snapshot,
             )
+            if failure := getattr(st.review_agent, "_scheduled_review_failure", None):
+                raise failure
     finally:
         clear_thread_tool_whitelist()
         # Attribute usage to the PARENT session. Snapshot BEFORE unregister/close so counters
@@ -1227,6 +1236,7 @@ def _run_review_in_thread(
     See #84423.
     """
     if review_run is not None and review_run.cancel_requested.is_set():
+        review_run.error, review_run.transient = "preempted", True
         finish_background_review_run(agent, review_run)
         return
     _set_thread_approval_callback(_bg_review_auto_deny)
@@ -1241,6 +1251,9 @@ def _run_review_in_thread(
             getattr(agent, "provider", "?"),
         )
         _set_thread_approval_callback(None)
+        if review_run is not None:
+            review_run.error = "provider_does_not_support_tools"
+            finish_background_review_run(agent, review_run)
         return
     st = _ReviewForkState()
     try:
@@ -1281,11 +1294,22 @@ def _run_review_in_thread(
         if actions:
             _publish_review_summary(agent, actions)
     except Exception as e:
+        if review_run is not None:
+            from agent.review_scheduler import retryable_error
+            review_run.error = type(e).__name__
+            review_run.transient = retryable_error(e)
         logger.warning("Background memory/skill review failed: %s", e)
         if st.review_usage:
             _log_review_completion(st.review_usage, "error")
         agent._emit_auxiliary_failure(t("display.review.aux_failure_label"), e)
     finally:
+        if review_run is not None:
+            review_run.usage = {key: st.review_usage.get(key, 0) for key in _USAGE_COUNTERS}
+            if review_run.cancel_requested.is_set() or (st.result or {}).get("interrupted"):
+                review_run.error, review_run.transient = "preempted", True
+            elif isinstance(st.result, dict) and (st.result.get("failed") or st.result.get("error")):
+                review_run.error = str(st.result.get("failure_reason") or "review_failed")
+                review_run.transient = bool(st.result.get("failure_retryable", False)) and review_run.error != "unknown"
         # Safety net for the exception path (setup failures before the request-phase finally).
         # Both cleanups are identity-scoped and idempotent; re-enter thread-scoped silence so
         # cleanup output stays quiet without blanking other threads.

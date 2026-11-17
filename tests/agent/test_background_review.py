@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import threading
+import pytest
 
 import run_agent as run_agent_module
 from run_agent import AIAgent
 
 
 _REAL_THREAD = threading.Thread
+
+
+@pytest.fixture(autouse=True)
+def execute_review_inline(monkeypatch):
+    # Reviewer execution and explicit-review handshake; scheduling has its own suite.
+    from agent.review_scheduler import SCHEDULER
+    monkeypatch.setattr(SCHEDULER, "enqueue", lambda agent, messages_snapshot, **kw:
+                        AIAgent._spawn_background_review_now(agent, messages_snapshot, **kw))
+    monkeypatch.setattr(SCHEDULER, "turn_started", lambda agent: None)
 
 
 class _TurnBoundaryReached(Exception):
