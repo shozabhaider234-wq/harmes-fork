@@ -1280,6 +1280,8 @@ def _memory_provider_init_kwargs(agent, platform) -> Dict[str, Any]:
         # platform="cron" (scheduler) / "subagent" (delegate_task) → providers skip writes (MemoryProvider.initialize).
         "agent_context": platform if platform in ("cron", "subagent") else "primary",
     }
+    if platform == "subagent":
+        kwargs["parent_session_id"] = getattr(agent, "_parent_session_id", None)
     if kwargs["platform"] == "cli":
         kwargs["warning_callback"] = agent._emit_warning
         kwargs["status_callback"] = agent._emit_status
@@ -1309,6 +1311,16 @@ def _memory_provider_init_kwargs(agent, platform) -> Dict[str, Any]:
 
 
 def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
+    memory_section = _agent_cfg.get("memory", {}) if isinstance(_agent_cfg, dict) else {}
+    experiment = memory_section.get("experimental_core_profile", {}) if isinstance(memory_section, dict) else {}
+    experiment = experiment if isinstance(experiment, dict) else {}
+    agent._experimental_core_profile_requested = experiment.get("enabled") is True
+    try:
+        agent._core_profile_token_budget = max(128, int(experiment.get("token_budget", 300)))
+    except (TypeError, ValueError):
+        agent._core_profile_token_budget = 300
+    agent._core_profile_injected = False
+    agent._core_profile_token_count = 0
     # Native memory semantics; persistence may be supplied by the selected provider.
     mem_config = {}
     agent._memory_store = None
@@ -1342,6 +1354,14 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
         except Exception as error:
             _ra().logger.warning("Native memory store initialization failed: %s", error)
 
+    elif getattr(agent, "_allow_subagent_memd", False) and platform == "subagent":
+        # Read provider selection only; subagents never initialize native Markdown memory.
+        try:
+            from tools.memory_tool import get_builtin_memory_config
+            mem_config = get_builtin_memory_config(_agent_cfg)
+        except Exception as error:
+            _ra().logger.warning("Subagent memd configuration could not be read: %s", error)
+
     # External memory provider plugin (one at a time, alongside built-in): memory.provider.
     agent._memory_manager = None
     if memory_manager is not None and not skip_memory:
@@ -1349,7 +1369,11 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
         # already-initialized manager: providers keep their prefetch/retain state across turns instead
         # of being re-initialized (#120116). No initialize_all — the providers are already bound.
         agent._memory_manager = memory_manager
-    elif not skip_memory:
+    elif not skip_memory or (
+        getattr(agent, "_allow_subagent_memd", False)
+        and platform == "subagent"
+        and mem_config.get("provider") == "hermes-memd"
+    ):
         try:
             _mem_provider_name = mem_config.get("provider", "") if mem_config else ""
             if not is_core_memory_provider(_mem_provider_name):
@@ -1357,12 +1381,12 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
                 from plugins.memory import load_memory_provider as _load_mem
                 agent._memory_manager = _MemoryManager()
                 _mp = _load_mem(_mem_provider_name)
-                if _mp is None:
+                if _mp is None and not skip_memory:
                     # The provider left core for the catalog (or was never installed): fetch it once.
                     from hermes_cli.memory_provider_migration import recover_at_startup
                     if recover_at_startup(_mem_provider_name):
                         _mp = _load_mem(_mem_provider_name)
-                if _mp and _mp.is_available():
+                if _mp and (not skip_memory or _mem_provider_name == "hermes-memd") and _mp.is_available():
                     agent._memory_manager.add_provider(_mp)
                 elif _mp is not None and _mem_provider_name not in _warned_unavailable_providers:
                     # unavailable_reason() reads config/probes importlib — skip it once warned.
@@ -2411,6 +2435,7 @@ def init_agent(
     chat_id: str = None, chat_name: str = None, chat_type: str = None, thread_id: str = None,
     gateway_session_key: str = None, skip_context_files: bool = False,
     load_soul_identity: bool = False, skip_memory: bool = False,
+    allow_subagent_memd: bool = False,
     skip_background_review: bool = False, session_db=None, parent_session_id: str = None,
     iteration_budget: "IterationBudget" = None, run_budget_seconds: Optional[float] = None,
     fallback_model: Dict[str, Any] = None, credential_pool=None, checkpoints_enabled: bool = False,
@@ -2425,6 +2450,7 @@ def init_agent(
     _params = locals()
     for _name in _PASSTHROUGH_PARAMS:
         setattr(agent, _name, _params[_name])
+    agent._allow_subagent_memd = bool(allow_subagent_memd and platform == "subagent" and skip_memory)
     for _name in _GATEWAY_IDENTITY_PARAMS:
         setattr(agent, f"_{_name}", _params[_name])
     agent.session_cwd = cwd or None

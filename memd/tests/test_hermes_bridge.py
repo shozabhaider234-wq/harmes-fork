@@ -7,6 +7,9 @@ import shutil
 import sqlite3
 import sys
 import unittest
+from contextvars import copy_context
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 import test_persistent_client as support
@@ -27,7 +30,9 @@ class HermesBridgeTests(unittest.TestCase):
             with closing(sqlite3.connect(home / "state.db")) as db:
                 db.executescript("CREATE TABLE sessions(id TEXT PRIMARY KEY,title TEXT); CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,message_uid TEXT,content TEXT);")
                 db.execute("INSERT INTO sessions VALUES('session-1','original conversation')")
+                db.execute("INSERT INTO sessions VALUES('session-2','unrelated conversation')")
                 db.execute("INSERT INTO messages VALUES(1,'session-1','uid-1',?)",(f"Original {home.name} transcript message",))
+                db.execute("INSERT INTO messages VALUES(2,'session-2','uid-2',?)",(f"Private other {home.name} transcript",))
                 db.commit()
             self.originals[home] = hashlib.sha256((home / "state.db").read_bytes()).digest()
         set_multiplex_active(True)
@@ -64,6 +69,11 @@ class HermesBridgeTests(unittest.TestCase):
                 self.assertEqual(brief.detail, "brief")
                 tool_result = json.loads(manager.handle_tool_call("memd_memory",{"action":"recall","query":"Rust Cargo"}))
                 self.assertIn(expected[home],tool_result["context"])
+                with patch.object(provider, "ingest_memory", return_value="tool-write-id"):
+                    remembered = json.loads(provider.handle_tool_call(
+                        "memd_memory", {"action":"remember", "record":{"content":"primary write"}},
+                    ))
+                self.assertEqual(remembered["id"], "tool-write-id")
                 detailed_result = json.loads(manager.handle_tool_call("memd_memory",{"action":"recall","query":"Rust Cargo","detail":"brief"}))
                 self.assertIn(expected[home],detailed_result["context"])
                 self.assertEqual(manager.build_system_prompt(),"")
@@ -84,3 +94,61 @@ class HermesBridgeTests(unittest.TestCase):
                     self.assertEqual(client.request("storage_stats")["memory_count"],len(expected))
             finally:
                 reset_hermes_home_override(token)
+
+    def test_subagent_read_only_scope_provenance_and_shared_daemon_concurrency(self):
+        from plugins.memory import load_memory_provider
+        from memd.clients.python.hermes_bridge import source_reference
+
+        home = self.profiles[0]
+        token = set_hermes_home_override(home)
+        providers = []
+        try:
+            primary = load_memory_provider("hermes-memd")
+            primary.initialize("session-1", hermes_home=str(home))
+            memory_id = primary.ingest_memory({"content": "Subagent scoped Cargo recall evidence"}, message_uid="uid-1")
+            _, _, _, scope, _ = primary._binding()
+            foreign_scope = {**scope, "agent_id": "unrelated-agent"}
+            with self.server.client() as client:
+                client.store({"content": "Private memory for another agent", **foreign_scope})
+                storage_count = client.request("storage_stats")["memory_count"]
+
+            for index in range(4):
+                child = load_memory_provider("hermes-memd")
+                child.initialize(
+                    f"child-{index}", hermes_home=str(home), agent_context="subagent", parent_session_id="session-1",
+                )
+                providers.append(child)
+
+            contexts = [copy_context() for _ in range(4)]
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                packages = list(pool.map(
+                    lambda index: contexts[index].run(
+                        providers[index].recall, "Cargo", token_budget=1024, token_counter=len,
+                    ), range(4),
+                ))
+            self.assertTrue(all(memory_id in package.selected_memory_ids for package in packages), [
+                (package.retrieved_count, package.selected_memory_ids, package.token_count, package.text)
+                for package in packages
+            ])
+            self.assertTrue(all(package.token_count <= 1024 for package in packages))
+            self.assertTrue(all("another agent" not in package.text for package in packages))
+            with self.server.client() as client:
+                self.assertEqual(client.request("storage_stats")["memory_count"], storage_count)
+
+            child = providers[0]
+            ref = next(value.split("@", 1)[1] for value in packages[0].provenance if "@" in value)
+            source = json.loads(child.handle_tool_call("memd_memory", {"action": "source", "source_ref": ref}))
+            self.assertIn("Original", source["excerpt"])
+            history = json.loads(child.handle_tool_call("memd_memory", {"action": "history", "query": "Private other"}))
+            self.assertEqual(history, [])
+            with self.assertRaises(ValueError):
+                child.handle_tool_call(
+                    "memd_memory", {"action": "source", "source_ref": source_reference(home, "session-2", "uid-2")},
+                )
+            for action in ("remember", "update", "delete"):
+                with self.assertRaises(ValueError):
+                    child.handle_tool_call("memd_memory", {"action": action, "record": {"content": "forbidden"}})
+        finally:
+            for provider in providers:
+                provider.shutdown()
+            reset_hermes_home_override(token)

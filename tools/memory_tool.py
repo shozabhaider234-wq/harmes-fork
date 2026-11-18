@@ -337,8 +337,10 @@ def apply_memory_pending(payload: Dict[str, Any], store: "MemoryStore") -> Dict[
 MEMORY_SCHEMA = {
     "name": "memory",
     "description": (
-        "Save durable facts to persistent memory that survive across sessions. Memory is "
-        "injected into every future turn, so keep entries compact and high-signal.\n\n"
+        "Deliberately add, replace, or remove durable facts that have a meaningful reason to persist "
+        "across sessions. This tool writes memory; it does not search or retrieve existing memories. "
+        "Do not use it merely to check whether a memory exists. Ordinary calculations and general "
+        "knowledge questions do not by themselves need a memory update.\n\n"
         "HOW: make ALL your changes in ONE call via an 'operations' array (each item: "
         "{action, content?, old_text?}). The batch applies atomically and the char limit is "
         "checked only on the FINAL result — so a single call can remove/replace stale entries "
@@ -350,8 +352,7 @@ MEMORY_SCHEMA = {
         "is, stable environment facts, standing conventions with no task home. Anything "
         "learned while doing a task (procedures, pitfalls, and the user's preferences and "
         "corrections for that kind of work) belongs in the task's skill via skill_manage, "
-        "where it loads only when relevant; memory is injected into every turn and must "
-        "stay small.\n\n"
+        "where it loads only when relevant; keep durable memory small.\n\n"
         "IF FULL: an add is rejected with the current entries shown. Reissue as ONE batch that "
         "removes or shortens enough stale entries and adds the new one together.\n\n"
         "TARGETS: 'user' = who the user is (name, role, preferences, style). 'memory' = your "

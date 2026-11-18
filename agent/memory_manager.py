@@ -109,6 +109,16 @@ def memory_provider_tools_exposed(agent: Any) -> bool:
     tools = getattr(agent, "tools", None)
     present = isinstance(tools, (list, tuple)) and any(_tool_name(t) == "memory" for t in tools)
     enabled, disabled = getattr(agent, "enabled_toolsets", None), getattr(agent, "disabled_toolsets", None)
+    manager = getattr(agent, "_memory_manager", None)
+    providers = getattr(manager, "providers", ()) if manager else ()
+    if (
+        getattr(agent, "platform", None) == "subagent"
+        and getattr(agent, "_allow_subagent_memd", False)
+        and len(providers) == 1
+        and getattr(providers[0], "name", None) == "hermes-memd"
+        and manager.has_tool("memd_memory")
+    ):
+        return True
     return memory_provider_tools_enabled(enabled, disabled, memory_tool_present=present)
 
 
@@ -141,6 +151,13 @@ def inject_memory_provider_tools(agent: Any) -> int:
 
     if getattr(agent, "valid_tool_names", None) is None:
         agent.valid_tool_names = set()
+    providers = getattr(memory_manager, "providers", ())
+    subagent_memd = (
+        getattr(agent, "platform", None) == "subagent"
+        and getattr(agent, "_allow_subagent_memd", False)
+        and len(providers) == 1
+        and getattr(providers[0], "name", None) == "hermes-memd"
+    )
     existing_tool_names = {_tool_name(tool) for tool in tools if isinstance(tool, dict)}
     added = 0
     for raw_schema in get_schemas():
@@ -150,6 +167,8 @@ def inject_memory_provider_tools(agent: Any) -> int:
                 "Memory provider returned a tool schema with no resolvable "
                 "name; skipping to avoid poisoning the request (%r)", raw_schema,
             )
+        elif subagent_memd and schema["name"] != "memd_memory":
+            continue
         elif schema["name"] not in existing_tool_names:
             tools.append({"type": "function", "function": schema})
             agent.valid_tool_names.add(schema["name"])

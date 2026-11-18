@@ -58,6 +58,22 @@ from tools.delegate_tool_results import (  # noqa: F401
 
 _ROLES = frozenset({"leaf", "orchestrator"})
 
+
+def _parent_has_exposed_memd(parent_agent) -> bool:
+    """Only delegate the memd capability when the parent currently has it exposed."""
+    manager = getattr(parent_agent, "_memory_manager", None)
+    tools = getattr(parent_agent, "tools", None)
+    if manager is None or not isinstance(tools, (list, tuple)):
+        return False
+    if not any(
+        isinstance(tool, dict)
+        and tool.get("function", {}).get("name") == "memd_memory"
+        for tool in tools
+    ) or not manager.has_tool("memd_memory"):
+        return False
+    providers = getattr(manager, "providers", ())
+    return isinstance(providers, (list, tuple)) and len(providers) == 1 and getattr(providers[0], "name", None) == "hermes-memd"
+
 # Nested delegation is granted by depth/role in _build_child_agent, never by the
 # model naming toolsets (there is no model-facing toolsets argument).
 def _normalize_role(r: Optional[str]) -> str:
@@ -200,6 +216,12 @@ def _build_child_agent(
     # as auxiliary.review.
     delegation_cfg = _load_config()
     child_toolsets, child_disabled_toolsets = _resolve_child_toolsets(parent_agent, toolsets, effective_role)
+    memd_cfg = delegation_cfg.get("memd")
+    allow_subagent_memd = (
+        isinstance(memd_cfg, dict)
+        and memd_cfg.get("enabled") is True
+        and _parent_has_exposed_memd(parent_agent)
+    )
     child_prompt = _build_child_system_prompt(
         goal, context, workspace_path=_resolve_workspace_hint(parent_agent), role=effective_role,
         max_spawn_depth=max_spawn, child_depth=child_depth,
@@ -239,6 +261,7 @@ def _build_child_agent(
                 ephemeral_system_prompt=child_prompt, log_prefix=f"[subagent-{task_index}]", platform="subagent",
                 side_agent=True,
                 skip_context_files=True, skip_memory=True, clarify_callback=None,
+                allow_subagent_memd=allow_subagent_memd,
                 thinking_callback=(
                     (lambda text: _safe_progress(child_progress_cb, "_thinking", text) if text else None)
                     if child_progress_cb else None

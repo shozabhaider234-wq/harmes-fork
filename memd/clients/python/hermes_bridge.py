@@ -285,7 +285,19 @@ class MemdMemoryProvider(MemoryProvider):
         home = kwargs.get("hermes_home") or get_hermes_home()
         config = self._config(home)
         self._ensure_daemon(home, config)
-        self._sessions[hermes_home_key(home)] = {"session_id":session_id,"context":kwargs.get("agent_context","primary")}
+        self._sessions[hermes_home_key(home)] = {
+            "session_id": session_id,
+            "context": kwargs.get("agent_context", "primary"),
+            "parent_session_id": kwargs.get("parent_session_id"),
+            "authorized_source_refs": {},
+        }
+
+    def build_core_profile(self, *, token_budget=300, token_counter=None):
+        """Compile the prompt profile from this profile's own Rust records."""
+        _, _, config, scope, _ = self._binding()
+        from .core_profile import build_core_profile
+        with MemdClient(**endpoint_options(config["endpoint"])) as client:
+            return build_core_profile(client, scope, token_budget=token_budget, token_counter=token_counter)
 
     def create_native_store(self, **kwargs):
         from .native_store import RustMemoryStore
@@ -347,23 +359,46 @@ class MemdMemoryProvider(MemoryProvider):
                                  token_counter_method=token_counter_method)
         if effective == 0:
             return builder.empty_package(len(hits), detail=detail, budget_reason=reason)
-        return builder.build(hits, token_budget=effective, detail=detail, budget_reason=reason,
-                             include_superseded=include_superseded)
+        package = builder.build(hits, token_budget=effective, detail=detail, budget_reason=reason,
+                                include_superseded=include_superseded)
+        if self._binding()[1]["context"] == "subagent":
+            refs = (provenance.partition("@")[2] for provenance in package.provenance)
+            self._remember_authorized_sources(ref for ref in refs if ref)
+        return package
+
+    def _remember_authorized_sources(self, references):
+        state = self._binding()[1]
+        authorized = state["authorized_source_refs"]
+        for reference in references:
+            authorized[reference] = None
+            if len(authorized) > 500:
+                # ponytail: cap retained provenance at 500 refs per child; raise only if long jobs need older links.
+                del authorized[next(iter(authorized))]
 
     def shutdown(self):
         self._sessions.pop(hermes_home_key(),None)
 
     def get_tool_schemas(self):
-        return [{"name":"memd_memory","description":"Remember an explicitly selected semantic fact or episode; recall a budgeted context package; inspect original session provenance. Never send full transcripts as memories.",
+        schema = {"name":"memd_memory","description":"Use memd_memory.recall to retrieve relevant historical memory when the answer depends on past preferences, project decisions, or facts absent from the current context. Do not recall for self-contained questions or when the compact core profile is sufficient. Use action=remember for an explicitly requested or otherwise justified project/event/episodic record that should persist as a searchable memory; use the ordinary memory tool for the curated durable profile (standing user preferences, environment facts, and conventions), and avoid duplicating the same fact in both stores. Use source/history only to inspect provenance or prior sessions. Never send full transcripts as memories.",
                  "parameters":{"type":"object","properties":{
                      "action":{"type":"string","enum":["remember","recall","source","history"]},
-                     "target":{"type":"string","enum":["memory","user"],"description":"For remember: user for persona/preferences, memory for environment/project facts (default). Use the same target as native memory to deduplicate."},
+                     "target":{"type":"string","enum":["memory","user"],"description":"For remember: user for persona/preferences, memory for project/event/episodic facts (default). Prefer the ordinary memory tool for the curated standing profile; avoid duplicate writes."},
                      "record":{"type":"object","properties":{"content":{"type":"string"},"kind":{"type":"string","enum":["semantic","episodic"]},"tags":{"type":"array","items":{"type":"string"}}},"required":["content"]},
-                     "query":{"type":"string"},"detail":{"type":"string","enum":["brief","normal","deep","exhaustive"],"description":"Optional recall detail; defaults to normal."},"include_superseded":{"type":"boolean","description":"Include explicitly superseded records for historical questions."},"source_ref":{"type":"string"}},"required":["action"]}}]
+                     "query":{"type":"string"},"detail":{"type":"string","enum":["brief","normal","deep","exhaustive"],"description":"Optional recall detail; defaults to normal."},"include_superseded":{"type":"boolean","description":"Include explicitly superseded records for historical questions."},"source_ref":{"type":"string"}},"required":["action"]}}
+        state = self._sessions.get(hermes_home_key())
+        if state and state.get("context") == "subagent":
+            schema["parameters"]["properties"]["action"]["enum"] = ["recall", "source", "history"]
+            schema["parameters"]["properties"].pop("record")
+            schema["parameters"]["properties"].pop("target")
+        return [schema]
 
     def handle_tool_call(self, tool_name, args, **kwargs):
         if tool_name != "memd_memory":
             raise ValueError("unknown memory tool")
+        _, state, _, _, _ = self._binding()
+        action = args.get("action")
+        if state.get("context") == "subagent" and action not in {"recall", "source", "history"}:
+            raise ValueError("subagents have read-only memd access")
         actions = {
             "remember":lambda: {"id":self.ingest_memory(args["record"], target=args.get("target") or "memory")},
             "recall":lambda: {"context":self.recall(args["query"], detail=args.get("detail", "normal"),
@@ -371,12 +406,17 @@ class MemdMemoryProvider(MemoryProvider):
                                                        token_counter_method=kwargs.get("token_counter_method"),
                                                        context_capacity=kwargs.get("context_capacity"),
                                                        include_superseded=bool(args.get("include_superseded", False))).text},
-            "source":lambda: self.resolve_source(args["source_ref"]),
+            "source":lambda: self._resolve_authorized_source(args["source_ref"], state),
             "history":lambda: self.search_sessions(args["query"]),
         }
-        if args.get("action") not in actions:
+        if action not in actions:
             raise ValueError("unknown memory action")
-        return json.dumps(actions[args["action"]](),ensure_ascii=False)
+        return json.dumps(actions[action](),ensure_ascii=False)
+
+    def _resolve_authorized_source(self, reference, state):
+        if state.get("context") == "subagent" and reference not in state["authorized_source_refs"]:
+            raise ValueError("source reference was not authorized by this subagent's recall or history results")
+        return self.resolve_source(reference)
 
     def _history_db(self):
         path = (get_hermes_home() / "state.db").resolve()
@@ -388,11 +428,21 @@ class MemdMemoryProvider(MemoryProvider):
     def search_sessions(self, query, k=20):
         if not isinstance(query,str) or not query.strip():
             return []
+        _, state, _, _, _ = self._binding()
+        parent_session_id = state.get("parent_session_id") if state.get("context") == "subagent" else None
+        if state.get("context") == "subagent" and not parent_session_id:
+            raise ValueError("subagent history scope is unavailable")
         with closing(self._history_db()) as db:
             # Return bounded excerpts, never persist or embed session-history content.
-            rows = db.execute("SELECT session_id,message_uid,substr(content,1,400) AS excerpt FROM messages WHERE instr(lower(content),lower(?))>0 ORDER BY id DESC LIMIT ?",(query,min(max(int(k),0),100))).fetchall()
+            if parent_session_id:
+                rows = db.execute("SELECT session_id,message_uid,substr(content,1,400) AS excerpt FROM messages WHERE session_id=? AND instr(lower(content),lower(?))>0 ORDER BY id DESC LIMIT ?",(parent_session_id,query,min(max(int(k),0),100))).fetchall()
+            else:
+                rows = db.execute("SELECT session_id,message_uid,substr(content,1,400) AS excerpt FROM messages WHERE instr(lower(content),lower(?))>0 ORDER BY id DESC LIMIT ?",(query,min(max(int(k),0),100))).fetchall()
         home = get_hermes_home()
-        return [{**dict(row),"source_ref":source_reference(home,row["session_id"],row["message_uid"])} for row in rows]
+        results = [{**dict(row),"source_ref":source_reference(home,row["session_id"],row["message_uid"])} for row in rows]
+        if parent_session_id:
+            self._remember_authorized_sources(item["source_ref"] for item in results)
+        return results
 
     def resolve_source(self, reference):
         parts = urlsplit(reference)
@@ -406,5 +456,5 @@ class MemdMemoryProvider(MemoryProvider):
             else:
                 if segments[2] != "messages":
                     raise ValueError("invalid message reference")
-                row = db.execute("SELECT session_id,message_uid,substr(content,1,400) AS excerpt FROM messages WHERE message_uid=? ORDER BY (session_id=?) DESC,id DESC LIMIT 1",(unquote(segments[3]),session)).fetchone()
+                row = db.execute("SELECT session_id,message_uid,substr(content,1,400) AS excerpt FROM messages WHERE message_uid=? AND session_id=? ORDER BY id DESC LIMIT 1",(unquote(segments[3]),session)).fetchone()
         return dict(row) if row else None

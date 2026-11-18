@@ -51,3 +51,10 @@ def test_memory_alias_persists_with_content_precedence(tmp_path, monkeypatch):
                                              "new_text": "Household owns a coupe."}])
     assert result["success"], result
     assert sink.writes[-1] == ("replace", "user", "Household owns a coupe.")
+
+    result = call(action="add", target="memory", content="Synthetic calculation: 25 × 16 = 400.")
+    assert result["success"], result
+    assert "Synthetic calculation: 25 × 16 = 400." in (
+        tmp_path / "memories" / "MEMORY.md"
+    ).read_text(encoding="utf-8")
+    assert sink.writes[-1] == ("add", "memory", "Synthetic calculation: 25 × 16 = 400.")

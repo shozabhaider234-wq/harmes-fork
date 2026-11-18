@@ -156,6 +156,29 @@ supports updates by ID. Writes are disabled for non-primary agent contexts.
 `sync_turn` remains a no-op: ordinary conversation is neither copied nor embedded.
 The static system prompt block is empty. Context appears only in an explicit tool
 result; the bridge never mutates the prompt or injects conversation messages.
+
+### Experimental core profile (opt-in)
+
+The fork also has an experimental, default-off prompt mode. Enable it in a
+synthetic test profile with `memory.experimental_core_profile.enabled: true`
+and an optional `memory.experimental_core_profile.token_budget` (default 300).
+At session prompt assembly, the existing `hermes-memd` provider compiles a
+small profile from the active profile's private Rust namespaces. It prioritizes
+user-profile records and explicitly categorized preferences, constraints,
+projects, and decisions; expires/superseded, episodic, sensitive-tagged, and
+strict threat-scan matches are omitted or blocked. Source category and update
+date accompany included facts. The profile is regenerated on a new session or
+sanctioned prompt rebuild, so removing, superseding, or expiring a record takes
+effect then. No LLM call generates it. B1 remains unchanged when the key is
+absent or false. In B2 only the redundant native MEMORY.md and USER.md prompt
+blocks are replaced; `memd_memory`, scopes, and ContextBuilder remain active.
+
+The provider tokenizer is not available at prompt assembly, so the default
+budget uses Hermes' rough token estimator. A future caller may supply a model
+token counter. The manifest lists only categories observed in that active
+namespace; when the inventory exceeds memd's existing response cap, a bounded
+topical retrieval fallback builds the profile and the manifest describes only
+the observed records.
 The ContextBuilder uses Hermes' shared rough token estimate with 25% safety padding
 unless a caller supplies a counter. This is not an always-on LLM extractor or Prime algorithm.
 Selection is deterministic and bounded by the retrieved top-k. Optional utility
@@ -192,6 +215,15 @@ diagnostics identify this as an estimate, not exact tokenizer output. A direct
 caller can supply its own counter, which is applied to final JSON formatting, IDs,
 provenance and separators. Each retrieved candidate is serialized and counted once;
 retrieval is bounded to at most 100 per namespace.
+
+Subagents can opt into independent, read-only recall with `delegation.memd.enabled: true`
+in `config.yaml`; it is disabled by default. A child receives this capability only
+when its parent currently has the `hermes-memd` tool exposed. The child initializes
+only that provider, keeps the native `memory` tool disabled, and cannot remember or
+mutate stored records. Its `history` action is restricted to the immediate parent's
+session. A `source` reference must have been returned by that child's own recall or
+authorized history result. The child uses its own context usage and the same shared
+daemon, profile namespace, retrieval ranking and `ContextBuilder` budget.
 
 Rust stores optional `superseded_by` in the record payload and indexed column
 (migration 003). Links must resolve inside the same namespace, access scope and

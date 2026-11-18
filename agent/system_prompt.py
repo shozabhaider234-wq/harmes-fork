@@ -518,7 +518,41 @@ def _memory_parts(agent: Any) -> List[str]:
     the same check ``inject_memory_provider_tools`` uses, so we never advertise
     tools the toolset config gated off)."""
     parts: List[str] = []
-    if agent._memory_store:
+    profile_provider = None
+    profile_block = None
+    if getattr(agent, "_experimental_core_profile_requested", False):
+        manager = getattr(agent, "_memory_manager", None)
+        candidate = manager.get_provider("hermes-memd") if manager else None
+        if candidate and callable(getattr(candidate, "build_core_profile", None)):
+            profile_provider = candidate
+            try:
+                profile_block, profile_receipt = candidate.build_core_profile(
+                    token_budget=getattr(agent, "_core_profile_token_budget", 300),
+                    token_counter=getattr(agent, "_core_profile_token_counter", None),
+                )
+                agent._core_profile_injected = bool(profile_block)
+                agent._core_profile_token_count = int(profile_receipt.get("token_count", 0))
+                logger.info(
+                    "Experimental core memory profile assembled: tokens=%d budget=%d included=%d categories=%s inventory_complete=%s",
+                    agent._core_profile_token_count,
+                    int(profile_receipt.get("token_budget", getattr(agent, "_core_profile_token_budget", 300))),
+                    int(profile_receipt.get("records_included", 0)),
+                    ",".join(profile_receipt.get("categories", [])),
+                    bool(profile_receipt.get("inventory_complete", False)),
+                )
+            except Exception:
+                # Fail closed on content: do not fall back to injecting the full database.
+                logger.warning("Experimental core memory profile could not be assembled", exc_info=True)
+                profile_block = (
+                    "CORE MEMORY PROFILE\nProfile unavailable. Use memd_memory.recall when historical context is required; do not guess."
+                )
+                agent._core_profile_injected = True
+                agent._core_profile_token_count = 0
+        else:
+            logger.warning("Experimental core memory profile requires the hermes-memd provider; keeping native prompt behavior")
+    if profile_block:
+        parts.append(profile_block)
+    if agent._memory_store and profile_provider is None:
         for enabled, kind in ((agent._memory_enabled, "memory"), (agent._user_profile_enabled, "user")):
             block = agent._memory_store.format_for_system_prompt(kind) if enabled else None
             if block:
@@ -526,7 +560,7 @@ def _memory_parts(agent: Any) -> List[str]:
     # External memory provider system prompt block (additive to built-in). Gated on the same check
     # ``inject_memory_provider_tools`` uses so we never advertise provider tools that the agent's toolset
     # configuration has already gated off (#81014).
-    if agent._memory_manager:
+    if agent._memory_manager and profile_provider is None:
         try:
             from agent.memory_manager import memory_provider_tools_exposed as _mem_exposed
         except Exception:
