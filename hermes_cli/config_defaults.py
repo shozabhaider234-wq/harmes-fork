@@ -1329,6 +1329,18 @@ DEFAULT_CONFIG = {
         # "mem0", "holographic", "retaindb", "byterover", or a catalog-installed one ("hindsight").
         "provider": "",
     },
+    # Cross-session procedural learning is opt-in; Prime stores its state under this profile.
+    "learning": {
+        "provider": "none",  # "none" | "prime"
+        "prime": {
+            "enabled": True,
+            "trigger": "manual",
+            "minimum_experiences": 3,
+              "experience_threshold": 5,
+            "scope": "global",
+              "validation_tasks": [],
+        },
+    },
     # Subagent delegation — override the provider:model used by delegate_task so children run on a
     # cheaper/faster model. Uses the same runtime provider resolution as CLI/gateway startup, so
     # every configured provider is supported.

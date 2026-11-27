@@ -1,36 +1,38 @@
 # Live parent/child memory receipt
 
-Run from a normal Windows PowerShell terminal. The Codex sandbox denied execution
-of `.memd-test-venv/Scripts/python.exe`; this procedure has **not** been executed
-in that sandbox. No live success or regression-test result is claimed.
+Run from a normal Windows PowerShell terminal using the PM-built test environment.
+The verifier requires the named, isolated Hermes profile `harmes-harness`; it will
+not fall back to a normal user home or copy authentication material.
 
 ```powershell
 Set-Location 'E:\AI_Project_Sem3\harmes-fork'
-$testPython = 'E:\AI_Project_Sem3\harmes-fork\.memd-test-venv\Scripts\python.exe'
+$testPython = 'E:\AI_Project_Sem3\harmes-fork\memd\.tmp-build\harness-final-tests\Scripts\python.exe'
 & $testPython memd/scripts/verify_parent_child_e2e.py --self-check
 if ($LASTEXITCODE -ne 0) { throw 'Receipt checker self-check failed' }
-& $testPython memd/scripts/verify_parent_child_e2e.py
+```
+
+Authenticate the isolated profile interactively once:
+
+```powershell
+hermes -p harmes-harness auth add openai-codex
+```
+
+Expected confirmation: `Login successful!`. Then run against that profile home:
+
+```powershell
+& $testPython memd/scripts/verify_parent_child_e2e.py `
+  --source-home "$env:USERPROFILE\.hermes\profiles\harmes-harness" `
+  --endpoint 'pipe:memd-parent-child-e2e'
 if ($LASTEXITCODE -ne 0) { throw 'Live receipt failed; inspect the printed evidence directory' }
 ```
 
-If the existing authenticated Hermes profile is elsewhere, supply its directory:
-
-```powershell
-& $testPython memd/scripts/verify_parent_child_e2e.py --source-home 'E:\path\to\existing-profile'
-```
-
-The default source home is the current `HERMES_HOME`, otherwise the user's
-`.hermes` directory. `--endpoint pipe:hermes-memd` can override endpoint discovery.
-The daemon must already be running; this harness never starts or stops it.
-If the source profile has an existing `auth.json`, a disposable copy is used.
-Otherwise the worker uses the repository's read-only Codex login reader for
-`CODEX_HOME/auth.json` (or the user's `.codex/auth.json`) and its existing import
-helper to populate only the disposable Hermes auth store. No login/setup is
-performed, and no token values are logged. The original auth files are never
-written. Credential resolution is read-only and OAuth refresh is blocked in the
-worker: copied single-use refresh grants must not be consumed. A valid existing
-access token is required throughout the check. An expired token stops the check
-instead of rotating or replacing credentials.
+`--source-home` is required and must point to the isolated profile home named
+`harmes-harness`. `--endpoint` overrides endpoint discovery. The daemon must
+already be running; this harness never starts or stops it. The worker resolves
+credentials only from the isolated profile's own Hermes auth store, blocks OAuth
+refresh, and never imports or copies secrets from another profile. A valid
+existing access token is required throughout the check. An expired token stops
+the check instead of rotating or replacing credentials.
 
 ### If the pipe is missing (WinError 2)
 
@@ -58,7 +60,8 @@ Leave it running, then in **PowerShell terminal 2**:
 
 ```powershell
 Set-Location 'E:\AI_Project_Sem3\harmes-fork'
-& .\.memd-test-venv\Scripts\python.exe memd/scripts/verify_parent_child_e2e.py --endpoint pipe:memd-parent-child-e2e
+$testPython = 'E:\AI_Project_Sem3\harmes-fork\memd\.tmp-build\harness-final-tests\Scripts\python.exe'
+& $testPython memd/scripts/verify_parent_child_e2e.py --source-home "$env:USERPROFILE\.hermes\profiles\harmes-harness" --endpoint pipe:memd-parent-child-e2e
 ```
 
 After terminal 2 finishes, press Ctrl+C in terminal 1 to stop only that foreground
@@ -133,8 +136,8 @@ Each run prints its evidence directory under `memd/.tmp-parent-child-e2e/<id>`:
 The worker has a 360-second outer timeout and bounded agent iterations. On
 timeout only the worker created by this script is terminated. No daemon is
 auto-started. Cleanup inventories and deletes only the unique namespace bound
-to the disposable profile hash (including its `:user` target), verifies both
-are empty, and removes the disposable home/auth copy. Evidence is retained.
+to the isolated profile hash (including its `:user` target), verifies both are
+empty, preserves the named profile and its own auth store, and retains evidence.
 Cleanup failure raises and is recorded; inspect the cleanup receipt even when
 the six model stages pass. No real memories, benchmark artifacts, learning
 systems, or existing uncommitted implementation files are changed.

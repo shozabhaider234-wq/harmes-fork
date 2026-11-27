@@ -370,6 +370,11 @@ class _ProviderCollector:
         self._context = None
         self._hook_source = None
 
+    @property
+    def is_active_provider(self) -> bool:
+        """Whether this registration is for the configured provider, not an availability probe."""
+        return self._register_skills
+
     def collect(self, register, *, source=None):
         """Run ``register`` with this collector; hooks it registers form the fallback group that
         general discovery of the same source replaces (see ``PluginLedgerMixin``)."""

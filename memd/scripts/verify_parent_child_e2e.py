@@ -13,7 +13,6 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -53,14 +52,12 @@ def worker(home: Path, evidence: Path, marker: str, query: str) -> int:
     auth.resolve_codex_runtime_credentials = resolve_existing
     auth_codex.resolve_codex_runtime_credentials = resolve_existing
     if not (home / "auth.json").is_file():
-        tokens = auth._import_codex_cli_tokens()  # Repository's read-only external-login reader.
-        if not tokens:
-            raise RuntimeError("No valid existing Codex login found; select the authenticated Hermes profile with --source-home")
-        (home / "auth.json").write_text("{}", encoding="utf-8")
-        auth._save_codex_tokens(tokens)  # Writes only the disposable profile; never the source login.
-        emit("oauth_source", source="existing_codex_login", refresh_enabled=False)
-    else:
-        emit("oauth_source", source="temporary_hermes_auth_copy", refresh_enabled=False)
+        raise RuntimeError(
+            "The isolated Hermes profile has no Hermes-owned Codex login. "
+            "Run `hermes -p harmes-harness auth add openai-codex` and retry; "
+            "this verifier never imports or copies credentials from another profile."
+        )
+    emit("oauth_source", source="isolated_hermes_profile", refresh_enabled=False)
 
     from plugins import memory
     original_load = memory.load_memory_provider
@@ -249,7 +246,8 @@ def self_check():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source-home", type=Path, default=Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")))
+    parser.add_argument("--source-home", type=Path,
+                        help="Existing isolated `harmes-harness` profile home with its own Hermes Codex login")
     parser.add_argument("--endpoint", help="Existing daemon endpoint; defaults to source-home/memd.json")
     parser.add_argument("--output", type=Path, default=ROOT / "memd" / ".tmp-parent-child-e2e")
     parser.add_argument("--timeout", type=int, default=360)
@@ -262,24 +260,29 @@ def main():
     if args.worker:
         home, evidence, marker, query = args.worker
         return worker(Path(home), Path(evidence), marker, query)
+    if args.source_home is None:
+        parser.error("--source-home is required; use the isolated Hermes profile named 'harmes-harness'")
     run_id = uuid.uuid4().hex
     output = args.output.resolve() / run_id
     output.mkdir(parents=True, exist_ok=False)
     evidence = output / "events.jsonl"
     marker, query = f"MEMD_PARENT_CHILD_E2E_{run_id}", f"receipt lookup {run_id[:12]}"
-    endpoint = args.endpoint or json.loads((args.source_home / "memd.json").read_text(encoding="utf-8-sig"))["endpoint"]
+    home = args.source_home.resolve()
+    if home.name.lower() != "harmes-harness":
+        parser.error("--source-home must be the isolated profile home named 'harmes-harness'")
+    if not (home / "auth.json").is_file():
+        print("No Hermes-owned Codex login in the isolated profile. Run `hermes -p harmes-harness auth add openai-codex`; expected confirmation: `Login successful!`.")
+        return 2
+    endpoint = args.endpoint or json.loads((home / "memd.json").read_text(encoding="utf-8-sig"))["endpoint"]
     config = {"endpoint": endpoint, "namespace": f"parent-child-e2e-{run_id}", "token_budget": 1000}
     evidence.write_text(json.dumps({"event": "test_started", "marker": marker, "query": query}) + "\n", encoding="utf-8")
-    home = Path(tempfile.mkdtemp(prefix="hermes-memd-e2e-"))
     cleanup_ok = False
     worker_started = False
     try:
         shutil.copytree(ROOT / "memd" / "clients" / "python", home / "plugins" / "hermes-memd",
+                        dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns("__pycache__"))
-        # No refresh grant may be spent; worker enforces read-only credential resolution.
-        auth = args.source_home / "auth.json"
-        if auth.is_file():
-            shutil.copy2(auth, home / "auth.json")
+        # Use only the isolated profile's own Hermes login; never copy credential files.
         (home / "memd.json").write_text(json.dumps(config), encoding="utf-8")
         (home / "config.yaml").write_text(
             "model:\n  default: gpt-6-luna\n  provider: openai-codex\n"
@@ -345,14 +348,11 @@ def main():
             # Before worker creation there cannot be a synthetic write to clean up.
             cleanup_ok = True
         finally:
-            # home was allocated by mkdtemp above; never remove the source profile or evidence.
-            try:
-                shutil.rmtree(home)
-            finally:
-                with evidence.open("a", encoding="utf-8") as stream:
-                    stream.write(json.dumps({"event": "cleanup", "synthetic_namespace_empty": cleanup_ok,
-                                             "daemon_cleanup_skipped": not worker_started,
-                                             "isolated_home_removed": not home.exists()}) + "\n")
+            # The named synthetic profile and its OAuth state are user-owned; preserve them.
+            with evidence.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps({"event": "cleanup", "synthetic_namespace_empty": cleanup_ok,
+                                         "daemon_cleanup_skipped": not worker_started,
+                                         "isolated_profile_preserved": home.exists()}) + "\n")
 
 
 if __name__ == "__main__":

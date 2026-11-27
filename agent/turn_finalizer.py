@@ -220,6 +220,17 @@ def _drop_transcript_scaffolding(agent, messages) -> None:
     _drop_verification_continuation_scaffolding(messages)
 
 
+def _current_turn_messages(messages):
+    """Return only the latest user turn and its assistant/tool trajectory."""
+    turn = []
+    for message in reversed(messages):
+        turn.append(message)
+        if isinstance(message, dict) and message.get("role") == "user":
+            break
+    turn.reverse()
+    return turn
+
+
 def _recover_final_from_stream(agent, final_response, interrupted, failed) -> Tuple[Any, bool]:
     """An empty terminal completion is not authoritative when the stream already
     delivered text; recover before persist so a blank tail isn't frozen (#95514).
@@ -768,6 +779,7 @@ def finalize_turn(
     # Memory provider on_session_end()/shutdown_all() are NOT called here:
     # run_conversation() runs once per message; CLI/gateway own session-end cleanup.
     if not getattr(agent, "_persist_disabled", False):
+        _turn_messages = _current_turn_messages(messages)
         _invoke_hook_safely(
             "on_session_end", logger,
             session_id=agent.session_id,
@@ -778,7 +790,12 @@ def finalize_turn(
             interrupted=interrupted,
             turn_exit_reason=_turn_exit_reason,
             model=agent.model,
+            provider=getattr(agent, "provider", None),
             platform=_platform,
+            task_instructions=original_user_message,
+            final_response=final_response,
+            api_call_count=api_call_count,
+            turn_messages=_turn_messages,
         )
 
     agent._turn_preflight_display_snapshot = None

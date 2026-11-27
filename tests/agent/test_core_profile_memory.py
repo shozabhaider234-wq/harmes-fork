@@ -42,6 +42,8 @@ def test_profile_is_scoped_deduplicated_bounded_and_provenanced():
     assert "updated:" in profile
     assert "Available deeper-memory categories observed" in profile
     assert "memd_memory" in profile
+    assert "otherwise answer directly" in profile
+    assert "Implicit references" in profile
 
 
 def test_profile_blocks_unsafe_memory_content():

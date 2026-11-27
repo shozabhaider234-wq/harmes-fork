@@ -82,6 +82,34 @@ class TestMissingModelSection:
         assert not any("no 'model' section" in i.message for i in issues)
 
 
+class TestLearningConfigValidation:
+    def test_prime_manual_learning_configuration_is_valid(self):
+        issues = validate_config_structure({"learning": {
+            "provider": "prime",
+            "prime": {"enabled": True, "trigger": "manual", "minimum_experiences": 3, "scope": "global"},
+        }})
+        assert not [issue for issue in issues if issue.severity == "error"]
+
+    def test_unknown_provider_and_invalid_threshold_are_reported(self):
+        issues = validate_config_structure({"learning": {
+            "provider": "avo", "prime": {"minimum_experiences": 0},
+        }})
+        errors = [issue.message for issue in issues if issue.severity == "error"]
+        assert any("learning.provider" in message for message in errors)
+        assert any("minimum_experiences" in message for message in errors)
+
+    def test_automatic_learning_triggers_and_threshold_validation(self):
+        for trigger in ("disabled", "manual", "after_objective", "after_n_experiences"):
+            issues = validate_config_structure({"learning": {"provider": "prime", "prime": {
+                "trigger": trigger, "experience_threshold": 4,
+            }}})
+            assert not [issue for issue in issues if issue.severity == "error"]
+        issues = validate_config_structure({"learning": {"provider": "prime", "prime": {
+            "trigger": "after_n_experiences", "experience_threshold": 0,
+        }}})
+        assert any("experience_threshold" in issue.message for issue in issues if issue.severity == "error")
+
+
 
 
 class TestVoiceSubmitModeValidation:

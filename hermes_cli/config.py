@@ -1236,6 +1236,57 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
             return [config_load_issue(exc)]
 
     issues: List[ConfigIssue] = []
+    learning = config.get("learning")
+    if learning is not None:
+        if not isinstance(learning, dict):
+            _issue(issues, "error", "learning must be a mapping",
+                   "Set learning.provider to 'none' or 'prime'")
+        else:
+            provider = learning.get("provider", "none")
+            if not isinstance(provider, str) or provider not in {"none", "prime"}:
+                _issue(issues, "error", "learning.provider must be 'none' or 'prime'",
+                       "Set learning.provider to 'none' or 'prime'")
+            prime = learning.get("prime", {})
+            if not isinstance(prime, dict):
+                _issue(issues, "error", "learning.prime must be a mapping",
+                       "Use a mapping for enabled, trigger, minimum_experiences, and scope")
+            else:
+                if not isinstance(prime.get("enabled", True), bool):
+                    _issue(issues, "error", "learning.prime.enabled must be a boolean",
+                           "Set it to true or false")
+                trigger = prime.get("trigger", "manual")
+                if trigger not in {"disabled", "manual", "after_objective", "after_n_experiences"}:
+                    _issue(issues, "error", "learning.prime.trigger must be disabled, manual, after_objective, or after_n_experiences",
+                           "Choose a supported Prime learning trigger")
+                minimum = prime.get("minimum_experiences", 3)
+                if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 1:
+                    _issue(issues, "error", "learning.prime.minimum_experiences must be a positive integer",
+                           "Set it to 1 or greater")
+                threshold = prime.get("experience_threshold", 5)
+                if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 1:
+                    _issue(issues, "error", "learning.prime.experience_threshold must be a positive integer",
+                           "Set it to 1 or greater")
+                validation_tasks = prime.get("validation_tasks", [])
+                if not isinstance(validation_tasks, list):
+                    _issue(issues, "error", "learning.prime.validation_tasks must be a list",
+                           "Add controlled tasks with instructions and objective checks")
+                else:
+                    for index, task in enumerate(validation_tasks):
+                      if (not isinstance(task, dict) or not isinstance(task.get("instructions"), str)
+                              or not task.get("instructions", "").strip() or not isinstance(task.get("checks"), list)
+                              or not task.get("checks")):
+                        _issue(issues, "error", f"learning.prime.validation_tasks[{index}] needs instructions and checks",
+                               "Each validation task needs instructions and at least one objective check")
+                        continue
+                      for check_index, check in enumerate(task["checks"]):
+                        if (not isinstance(check, dict) or check.get("type") not in {"contains", "not_contains", "equals"}
+                                or not isinstance(check.get("value"), str) or not check.get("value")):
+                            _issue(issues, "error",
+                                   f"learning.prime.validation_tasks[{index}].checks[{check_index}] is invalid",
+                                   "Use contains, not_contains, or equals with a non-empty value")
+                if not isinstance(prime.get("scope", "global"), str) or not prime.get("scope", "global").strip():
+                    _issue(issues, "error", "learning.prime.scope must be a non-empty string",
+                           "Set a scope name such as global")
     _validate_voice(config, issues)
     _validate_timezone(config, issues)
     cp = config.get("custom_providers")

@@ -165,8 +165,12 @@ def test_public_lifecycle_runs_host_aggregation(monkeypatch):
 
 def test_agent_turn_binds_and_clears_lifecycle_parent(monkeypatch):
     from run_agent import AIAgent
+    from agent.review_scheduler import SCHEDULER
 
     agent = AIAgent.__new__(AIAgent)
+    # This test covers the lifecycle binding; scheduler behavior has its own suite.
+    monkeypatch.setattr(SCHEDULER, "turn_started", lambda _agent: None)
+    monkeypatch.setattr(SCHEDULER, "turn_finished", lambda _token: None)
     observed = []
 
     def run_conversation(parent, *_args, **_kwargs):

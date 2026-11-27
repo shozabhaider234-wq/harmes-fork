@@ -89,3 +89,39 @@ Team A/Team B systems, credentials, and benchmark artifacts were preserved.
   authentication tokens appear in the collected report.
 - Nested privilege escalation and concurrent retrieval were not re-exercised by
   this single-child run; their prior focused-test results remain historical.
+
+## Rerun — November 25, 2026
+
+The recorded AppContainer Hermes venv was used after the reduced memd test
+interpreter failed before agent initialization because it lacked
+`python-dotenv`. The live command used the AppContainer Hermes login and a fresh
+temporary Rust daemon/store. **The then-current verifier copied `auth.json` into
+a disposable profile. That conflicted with the user's no-copy instruction.** No
+secret was printed, the source auth file was not modified, and the verifier
+removed the disposable profile after the run. I have changed the verifier so
+future runs require the isolated `harmes-harness` profile's own login and never
+copy or import credentials.
+
+```powershell
+& '<recorded AppContainer venv>\Scripts\python.exe' memd/scripts/verify_parent_child_e2e.py `
+  --source-home '<AppContainer Hermes home>' `
+  --endpoint 'pipe:hermes-memd-final-8672d2668e504f2ca8baea17c840991b' --timeout 360
+```
+
+Result: **all six stages passed; launcher exit 0**. Actual provider/model were
+`openai-codex` / `gpt-6-luna`. The child invoked Rust memory recall and returned
+the unique receipt to the parent, which used it in its final answer. Cleanup
+evidence reports `synthetic_namespace_empty=true` and
+`isolated_home_removed=true`; see
+[`events.jsonl`](.tmp-parent-child-e2e/5bf85a841cef4538b6d54f5d702b0304/events.jsonl)
+and [`report.json`](.tmp-parent-child-e2e/5bf85a841cef4538b6d54f5d702b0304/report.json).
+
+This receipt demonstrates real synchronous parent-child memory sharing and
+cleanup, but it does not satisfy the final no-copy authentication procedure.
+It is the finite-session synchronous fallback: the result payload states that
+`background=true` is unavailable in the finite session, so no asynchronous
+completion or later parent continuation is claimed. A compliant live rerun
+requires `hermes -p harmes-harness auth add openai-codex` first; expected
+confirmation is `Login successful!`. The initial reduced memd test venv attempt
+stopped before agent launch because it lacked `python-dotenv` and also cleaned
+its synthetic namespace/profile.

@@ -83,6 +83,22 @@ def test_missing_global_auth_file_is_safe(profile_env):
     assert read_credential_pool("anthropic") == []
 
 
+def test_adding_codex_to_profile_without_global_pool_persists_locally(profile_env):
+    """A new single-use OAuth grant must become profile-owned when there is no root row."""
+    from agent.credential_pool import AUTH_TYPE_OAUTH, PooledCredential, load_pool
+    from hermes_cli.auth import read_credential_pool
+
+    pool = load_pool("openai-codex")
+    pool.add_entry(PooledCredential(
+        provider="openai-codex", id="profile-codex", label="test-codex",
+        auth_type=AUTH_TYPE_OAUTH, priority=0, source="manual:device_code",
+        access_token="test-access", refresh_token="test-refresh",
+    ))
+
+    assert [entry["id"] for entry in read_credential_pool("openai-codex")] == ["profile-codex"]
+    assert not (profile_env["global"] / "auth.json").exists()
+
+
 def test_malformed_global_auth_file_does_not_break_profile_read(profile_env):
     (profile_env["global"] / "auth.json").write_text("{not valid json")
     _write(profile_env["profile"] / "auth.json", _make_auth_store(pool={

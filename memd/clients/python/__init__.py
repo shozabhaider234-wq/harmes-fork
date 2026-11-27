@@ -2,5 +2,5 @@
 
 
 def register(ctx):
-    from .hermes_bridge import MemdMemoryProvider
-    ctx.register_memory_provider(MemdMemoryProvider())
+    from .prime_integration import register as register_runtime
+    register_runtime(ctx)

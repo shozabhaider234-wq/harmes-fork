@@ -58,6 +58,8 @@ tar -czvf all-MiniLM-L6-v2.tar.gz -C memd/models/all-MiniLM-L6-v2 .
 - [crates/memcore/API.md](crates/memcore/API.md) — Public `memcore` API and examples.
 - [crates/memcore/DESIGN.md](crates/memcore/DESIGN.md) — Stage-by-stage design invariants.
 - [protocol.md](protocol.md) — `memd` IPC protocol v1 and measurement guide.
+- [PRIME_LEARNING.md](PRIME_LEARNING.md) — deterministic Prime-inspired artifact store,
+  callback task harness, test command, and current Hermes runtime integration limits.
 
 ## Standalone daemon use
 

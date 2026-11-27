@@ -230,7 +230,27 @@ def test_existing_daemon_is_reused_without_spawning_another_process(subagent_pro
 
 def test_subagent_schema_omits_remember_and_native_memory_tool_remains_blocked(subagent_provider):
     provider, _ = subagent_provider
-    schema = provider.get_tool_schemas()[0]["parameters"]
+    child_tool = provider.get_tool_schemas()[0]
+    child_schema = child_tool["parameters"]
+    assert child_schema["properties"]["action"]["enum"] == ["recall", "source", "history"]
+    assert "record" not in child_schema["properties"]
+    assert "target" not in child_schema["properties"]
+    assert child_schema["properties"]["query"]["description"]
+
+    state = provider._sessions[hermes_bridge.hermes_home_key()]
+    state["context"] = "primary"
+    parent_tool = provider.get_tool_schemas()[0]
+    state["context"] = "subagent"
+    parent_schema = parent_tool["parameters"]
+    assert parent_schema["properties"]["action"]["enum"] == ["remember", "recall", "source", "history"]
+    assert parent_schema["properties"]["query"]["description"] == child_schema["properties"]["query"]["description"]
+    assert "25 × 16" in parent_tool["description"]
+    assert "Explain binary search" in parent_tool["description"]
+    assert "capital of france" in parent_tool["description"].lower()
+    assert "implicit references are valid" in parent_tool["description"].lower()
+    assert "prior results suffice" in parent_tool["description"]
+
+    schema = child_schema
     assert schema["properties"]["action"]["enum"] == ["recall", "source", "history"]
     assert "record" not in schema["properties"]
     assert "target" not in schema["properties"]

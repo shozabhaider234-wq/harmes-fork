@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -42,6 +43,60 @@ def test_find_live_compression_child_fails_closed_when_ambiguous(db: SessionDB) 
     db.create_session("child-b", source="webui", parent_session_id="parent")
 
     assert db.find_live_compression_child("parent") is None
+
+
+def test_initial_context_receipt_is_immutable_and_session_scoped(db: SessionDB) -> None:
+    db.create_session("context-session", source="webui")
+    snapshot = {
+        "lineage_id": "context-session", "context_text": "durable fact",
+        "snapshot_version": 1, "snapshot_hash": "hash-1", "created_at": time.time(),
+        "token_count": 4, "token_budget": 800, "selected_memory_ids": ["mem-1"],
+        "generation_method": "test", "configuration_version": "v1",
+    }
+
+    first = db.store_initial_context_snapshot("context-session", snapshot)
+    second = db.store_initial_context_snapshot(
+        "context-session", {**snapshot, "context_text": "different retry", "snapshot_hash": "hash-2"}
+    )
+
+    assert first["context_text"] == second["context_text"] == "durable fact"
+    assert second["selected_memory_ids"] == ["mem-1"]
+
+    db.create_session("concurrent-context", source="webui")
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        results = list(workers.map(
+            lambda text: db.store_initial_context_snapshot(
+                "concurrent-context", {**snapshot, "lineage_id": "concurrent-context",
+                                       "context_text": text, "snapshot_hash": text}
+            ),
+            ("candidate-A", "candidate-B"),
+        ))
+    assert results[0]["context_text"] == results[1]["context_text"]
+    assert db.get_initial_context_snapshot("concurrent-context")["context_text"] in {
+        "candidate-A", "candidate-B",
+    }
+
+
+def test_context_diagnostics_and_compaction_extraction_claims_are_persisted(db: SessionDB) -> None:
+    db.create_session("diagnostic-lineage", source="webui")
+    snapshot = {
+        "lineage_id": "diagnostic-lineage", "context_text": "selected memory",
+        "snapshot_version": 1, "snapshot_hash": "snapshot-hash", "created_at": time.time(),
+        "token_count": 12, "token_budget": 800, "selected_memory_ids": ["m1", "m2"],
+        "generation_method": "test", "configuration_version": "v1",
+    }
+    db.store_initial_context_snapshot("diagnostic-lineage", snapshot)
+    db.store_initial_context_diagnostics("diagnostic-lineage", {
+        "token_count_method": "hermes_rough_estimate_padded", "selected_memory_count": 2,
+        "truncated": True, "budget_respected": True,
+    })
+
+    assert db.get_initial_context_snapshot("diagnostic-lineage")["selected_memory_count"] == 2
+    assert db.get_initial_context_snapshot("diagnostic-lineage")["token_count_method"] == "hermes_rough_estimate_padded"
+    assert db.begin_compaction_memory_extraction("compression:diagnostic-lineage", "diagnostic-lineage") is True
+    assert db.begin_compaction_memory_extraction("compression:diagnostic-lineage", "diagnostic-lineage") is False
+    db.finish_compaction_memory_extraction("compression:diagnostic-lineage", "complete", {"stored": 1})
+    assert db.get_compaction_memory_extraction("compression:diagnostic-lineage")["result"] == {"stored": 1}
 
 
 def test_reopen_orphaned_compression_session_reopens_parent_without_child(
