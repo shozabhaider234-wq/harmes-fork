@@ -330,3 +330,14 @@ native/fts5_cjk/*.so
 /pm/.lock.json.lock
 
 apps/desktop/.dist-build*
+
+# Local test profiles, benchmark runtimes and benchmark outputs. They hold
+# session databases, memory stores and profile config, so they must never be
+# committed. Benchmark scripts and docs outside these folders stay visible.
+.b2-live-newprompt-profiles/
+.hermes-benchmark-*/
+memd/.tmp-*/
+benchmarks/**/.pytest-tmp*/
+benchmarks/**/results/
+benchmarks/**/runtime-artifacts/
+benchmarks/**/selfcheck-home/
