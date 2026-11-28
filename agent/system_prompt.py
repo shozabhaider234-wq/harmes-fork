@@ -518,6 +518,9 @@ def _memory_parts(agent: Any) -> List[str]:
     the same check ``inject_memory_provider_tools`` uses, so we never advertise
     tools the toolset config gated off)."""
     parts: List[str] = []
+    if getattr(agent, "_compact_initial_context_provider", None) is not None:
+        # The lineage-scoped snapshot is placed in the stable tier by the caller.
+        return parts
     profile_provider = None
     profile_block = None
     if getattr(agent, "_experimental_core_profile_requested", False):
@@ -544,7 +547,7 @@ def _memory_parts(agent: Any) -> List[str]:
                 # Fail closed on content: do not fall back to injecting the full database.
                 logger.warning("Experimental core memory profile could not be assembled", exc_info=True)
                 profile_block = (
-                    "CORE MEMORY PROFILE\nProfile unavailable. Use memd_memory.recall when historical context is required; do not guess."
+                    "CORE MEMORY PROFILE\nProfile unavailable. Use memd_memory.recall only when historical information is missing from this conversation; otherwise answer directly. Do not guess."
                 )
                 agent._core_profile_injected = True
                 agent._core_profile_token_count = 0
@@ -573,6 +576,24 @@ def _memory_parts(agent: Any) -> List[str]:
             if _ext_mem_block:
                 parts.append(_ext_mem_block)
     return parts
+
+
+def _compact_initial_context_part(agent: Any) -> List[str]:
+    """Return the immutable Rust snapshot for this persisted session, when enabled."""
+    if not getattr(agent, "_compact_initial_context_requested", False):
+        return []
+    manager = getattr(agent, "_memory_manager", None)
+    provider = manager.get_provider("hermes-memd") if manager else None
+    if provider is None or not callable(getattr(provider, "build_initial_context", None)):
+        # Keep the configured legacy behavior when the Rust integration is inactive.
+        return []
+    from agent.compact_initial_context import load_or_create
+    text, receipt = load_or_create(agent, provider)
+    agent._compact_initial_context_provider = provider
+    agent._compact_initial_context_receipt = receipt
+    if not text.strip():
+        return []
+    return [text]
 
 
 def _identity_parts(agent: Any, ctx_len: Optional[int]) -> Tuple[List[str], bool]:
@@ -792,6 +813,8 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     stable_parts.extend(_alibaba_identity_part(agent))
     # Pinned skills are per-agent constants (resolved once), so they live in the stable prefix.
     stable_parts.extend(_auto_load_parts(agent))
+    compact_initial_context = _compact_initial_context_part(agent)
+    stable_parts.extend(compact_initial_context)
     # Coding posture: the operating brief stays in the stable prefix. The
     # environment block contains the current cwd/backend and belongs after
     # project context, not ahead of a large shared AGENTS.md block.

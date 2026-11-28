@@ -322,7 +322,11 @@ def test_stored_prompt_stamped_for_another_session_is_not_restored(monkeypatch, 
     monkeypatch.setenv("TERMINAL_ENV", "local")
     monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
     fields = dict(platform="cli", model="test-model", provider="test-provider", pass_session_id=True)
-    parent_prompt = build_system_prompt(_make_agent(session_id="parent-sid", **fields))
+    parent = _make_agent(session_id="parent-sid", **fields)
+    # The workspace AGENTS.md may exceed the prompt context-file limit. A real AIAgent
+    # exposes this diagnostic sink; keep the minimal fixture faithful when that warning fires.
+    parent._emit_diagnostic_status = lambda *_args, **_kwargs: None
+    parent_prompt = build_system_prompt(parent)
     assert _stored_prompt_matches_runtime(_make_agent(session_id="parent-sid", **fields), parent_prompt)
     assert not _stored_prompt_matches_runtime(_make_agent(session_id="child-sid", **fields), parent_prompt)
 

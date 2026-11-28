@@ -1312,6 +1312,14 @@ def _memory_provider_init_kwargs(agent, platform) -> Dict[str, Any]:
 
 def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
     memory_section = _agent_cfg.get("memory", {}) if isinstance(_agent_cfg, dict) else {}
+    compact = memory_section.get("compact_initial_context", {}) if isinstance(memory_section, dict) else {}
+    compact = compact if isinstance(compact, dict) else {}
+    agent._compact_initial_context_requested = compact.get("enabled") is True
+    agent._compact_initial_context_extract_on_compaction = compact.get("extract_on_compaction", True) is True
+    try:
+        agent._initial_context_token_budget = max(1, int(compact.get("token_budget", 800)))
+    except (TypeError, ValueError):
+        agent._initial_context_token_budget = 800
     experiment = memory_section.get("experimental_core_profile", {}) if isinstance(memory_section, dict) else {}
     experiment = experiment if isinstance(experiment, dict) else {}
     agent._experimental_core_profile_requested = experiment.get("enabled") is True

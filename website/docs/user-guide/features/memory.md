@@ -17,6 +17,25 @@ Two files make up the agent's memory:
 | **MEMORY.md** | Agent's personal notes — environment facts, conventions, things learned | 2,200 chars (~800 tokens) |
 | **USER.md** | User profile — your preferences, communication style, expectations | 1,375 chars (~500 tokens) |
 
+### Rust-backed compact initial context
+
+With the `hermes-memd` Rust provider, you can replace these full prompt snapshots with one deterministic, lineage-scoped selection:
+
+```yaml
+memory:
+  provider: hermes-memd
+  compact_initial_context:
+    enabled: true
+    token_budget: 800
+    extract_on_compaction: true
+```
+
+Hermes selects durable records from the Rust memory and user namespaces with the existing retrieval and `ContextBuilder` pipeline. The resulting snapshot is persisted per session id and reused byte-for-byte on resume and ordinary calls. In-place compaction keeps it; a compression that creates a child lineage takes a fresh snapshot. `memd_memory.recall` remains a separate, task-specific path. The budget defaults to 800 tokens; Hermes uses the active tokenizer if one is provided, otherwise its padded rough estimator, so the estimate is approximate. Set `enabled: false` or omit this block to retain the legacy prompt snapshots. This setting does not migrate or delete memory data.
+
+At a published compression child boundary, Hermes first finishes its existing conversation summary, then runs a bounded deterministic extraction over explicitly labeled statements in user messages (`Decision:`, `Preference:`, `Constraint:`, `Goal:`, `Correction:`, `Project progress:`, or `Lesson:`). Assistant and tool messages are ignored. Credential-like and unsafe candidates are rejected. Exact duplicates are skipped; related conflicting claims are retained with provenance rather than replacing prior records. Extraction receipts are keyed by the parent lineage so a retry reuses the recorded outcome and does not repeat writes. An incomplete receipt is not automatically retried for that same compaction; existing durable memories remain available and later successful child boundaries can learn new information. This high-precision rule-based extractor does not make an additional model call and may miss useful information that was not explicitly labeled. Set `extract_on_compaction: false` to disable it. If Rust is unavailable or extraction fails, Hermes logs and persists an incomplete receipt, then continues with existing memories and the preserved compaction summary.
+
+The setting takes effect when Hermes builds a prompt for a new session. A session with an already-persisted prompt resumes those exact prompt bytes; existing lineages are not rewritten just because configuration changed.
+
 Both are stored in `~/.hermes/memories/` and are injected into the system prompt as a frozen snapshot at session start. The agent manages its own memory via the `memory` tool — it can add, replace, or remove entries.
 
 :::caution One agent per Hermes home

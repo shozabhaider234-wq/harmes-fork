@@ -3339,7 +3339,7 @@ def _compression_child_source(agent: Any, parent_session_id: str) -> str:
 
 def _publish_rotated_compaction(
     agent: Any, messages: list, compressed: list, *, new_system_prompt: str, lease: _CompressionLease,
-    old_session_id: str, compressed_user_turn_outcome: str,
+    old_session_id: str, compressed_user_turn_outcome: str, system_message: str = "",
 ) -> None:
     """Rotate the session: flush the parent, publish the child, re-point the agent.
     Flushes current-turn msgs to the OLD session, passing the durable prefix (messages[:persist idx]) so
@@ -3405,6 +3405,13 @@ def _publish_rotated_compaction(
     _rebind_session_context(agent.session_id)
     agent._session_db_created = True
     _carry_session_state_to_child(agent, old_session_id, old_title)
+    if getattr(agent, "_compact_initial_context_requested", False):
+        # The child exists and the pre-compress checkpoint has completed. Only a
+        # confirmed rotation gets a new context snapshot; in-place compaction keeps its bytes.
+        agent._initial_context_allow_create = True
+        agent._invalidate_system_prompt()
+        agent._cached_system_prompt = agent._build_system_prompt(system_message)
+        agent._session_db.update_system_prompt(agent.session_id, agent._cached_system_prompt)
 
 
 def _warn_summary_or_aux_fallback(agent: Any) -> None:
@@ -3807,9 +3814,16 @@ def _commit_compaction(
                 # rollback off this name, so anything that fails from here on rolls the transcript back
                 # instead of leaving the failed attempt's compacted snapshot in place.
                 old_session_id = agent.session_id
+                if (getattr(agent, "_compact_initial_context_requested", False)
+                        and getattr(agent, "_compact_initial_context_extract_on_compaction", True)):
+                    # Summary generation already completed before _commit_compaction. Extract
+                    # from the completed parent transcript before publishing/building the child prompt.
+                    from agent.compaction_memory_extraction import extract_before_child_context
+                    extract_before_child_context(agent, messages, old_session_id)
                 _publish_rotated_compaction(
                     agent, messages, compressed, new_system_prompt=new_system_prompt, lease=lease,
                     old_session_id=old_session_id, compressed_user_turn_outcome=compressed_user_turn_outcome,
+                    system_message=system_message,
                 )
                 split_status = "rotated_committed"
                 agent._last_flushed_db_idx = len(compressed)
@@ -4255,6 +4269,8 @@ def compress_context(
             return messages, commit.refused_prompt
         compressed = commit.compressed
         split_status = commit.split_status
+        if commit.session_commit_succeeded and not commit.compacted_in_place:
+            new_system_prompt = getattr(agent, "_cached_system_prompt", new_system_prompt)
         _compressed_est = _finish_compaction_boundary(
             agent, compressed, new_system_prompt=new_system_prompt, old_session_id=commit.old_session_id,
             in_place=in_place, compacted_in_place=commit.compacted_in_place,

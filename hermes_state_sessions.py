@@ -695,6 +695,104 @@ class SessionSessionsMixin:
             (model_config_json, model, session_id),
         )
 
+    def get_initial_context_snapshot(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Return the immutable compact-context receipt for a session lineage node."""
+        if not session_id:
+            return None
+        row = self._read_one(
+            "SELECT * FROM initial_context_snapshots WHERE session_id = ?", (session_id,)
+        )
+        if row is None:
+            return None
+        result = dict(row)
+        try:
+            result["selected_memory_ids"] = json.loads(result["selected_memory_ids"])
+        except (TypeError, ValueError):
+            result["selected_memory_ids"] = []
+        diagnostics = self._read_one(
+            "SELECT token_count_method, selected_memory_count, truncated, budget_respected, generation_elapsed_ms "
+            "FROM initial_context_snapshot_diagnostics WHERE session_id = ?", (session_id,)
+        )
+        if diagnostics:
+            result.update(dict(diagnostics))
+            result["truncated"] = bool(result["truncated"])
+            result["budget_respected"] = bool(result["budget_respected"])
+        else:
+            result.update(token_count_method="unavailable_legacy_snapshot", selected_memory_count=len(result["selected_memory_ids"]),
+                          truncated=False, budget_respected=result["token_count"] <= result["token_budget"],
+                          generation_elapsed_ms=None)
+        return result
+
+    def store_initial_context_snapshot(self, session_id: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        """Atomically create once; retries and concurrent builders always receive the winner."""
+        if not session_id:
+            raise ValueError("session_id is required for an initial-context snapshot")
+        def _do(conn):
+            conn.execute(
+                """INSERT OR IGNORE INTO initial_context_snapshots (
+                       session_id, lineage_id, context_text, snapshot_version, snapshot_hash,
+                       created_at, token_count, token_budget, selected_memory_ids,
+                       generation_method, configuration_version
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (session_id, str(snapshot["lineage_id"]), str(snapshot["context_text"]),
+                 int(snapshot["snapshot_version"]), str(snapshot["snapshot_hash"]),
+                 float(snapshot["created_at"]), int(snapshot["token_count"]),
+                 int(snapshot["token_budget"]), json.dumps(snapshot["selected_memory_ids"]),
+                 str(snapshot["generation_method"]), str(snapshot["configuration_version"])),
+            )
+            row = conn.execute(
+                "SELECT * FROM initial_context_snapshots WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            return dict(row)
+        result = self._execute_write(_do)
+        result["selected_memory_ids"] = json.loads(result["selected_memory_ids"])
+        return result
+
+    def store_initial_context_diagnostics(self, session_id: str, diagnostics: Dict[str, Any]) -> None:
+        """Persist the counting receipt for the immutable snapshot, without changing its text."""
+        self._write_sql(
+            "INSERT OR IGNORE INTO initial_context_snapshot_diagnostics "
+            "(session_id, token_count_method, selected_memory_count, truncated, budget_respected, generation_elapsed_ms) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, str(diagnostics["token_count_method"]), int(diagnostics["selected_memory_count"]),
+             int(bool(diagnostics["truncated"])), int(bool(diagnostics["budget_respected"])),
+             float(diagnostics.get("generation_elapsed_ms", 0))),
+        )
+
+    def begin_compaction_memory_extraction(self, compaction_id: str, session_id: str) -> bool:
+        """Claim one lineage's extraction; retries and concurrent compressors share the first claim."""
+        if not compaction_id or not session_id:
+            raise ValueError("compaction_id and session_id are required")
+        def _do(conn):
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO compaction_memory_extractions "
+                "(compaction_id, session_id, status, result_json, updated_at) VALUES (?, ?, 'running', '{}', ?)",
+                (compaction_id, session_id, time.time()),
+            )
+            return cursor.rowcount == 1
+        return bool(self._execute_write(_do))
+
+    def finish_compaction_memory_extraction(self, compaction_id: str, status: str, result: Dict[str, Any]) -> None:
+        if status not in {"complete", "incomplete"}:
+            raise ValueError("invalid extraction status")
+        self._write_sql(
+            "UPDATE compaction_memory_extractions SET status = ?, result_json = ?, updated_at = ? WHERE compaction_id = ?",
+            (status, json.dumps(result, ensure_ascii=False), time.time(), compaction_id),
+        )
+
+    def get_compaction_memory_extraction(self, compaction_id: str) -> Optional[Dict[str, Any]]:
+        row = self._read_one(
+            "SELECT * FROM compaction_memory_extractions WHERE compaction_id = ?", (compaction_id,)
+        )
+        if row is None:
+            return None
+        result = dict(row)
+        try:
+            result["result"] = json.loads(result.pop("result_json"))
+        except (TypeError, ValueError):
+            result["result"] = {}
+        return result
+
     def update_system_prompt(self, session_id: str, system_prompt: Optional[str]) -> None:
         """Store the full assembled system prompt snapshot."""
         def _do(conn):

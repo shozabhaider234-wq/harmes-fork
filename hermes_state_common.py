@@ -440,6 +440,37 @@ CREATE TABLE IF NOT EXISTS sessions (
     FOREIGN KEY (system_prompt_hash) REFERENCES system_prompts(hash)
 );
 
+CREATE TABLE IF NOT EXISTS initial_context_snapshots (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    lineage_id TEXT NOT NULL,
+    context_text TEXT NOT NULL,
+    snapshot_version INTEGER NOT NULL,
+    snapshot_hash TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    token_count INTEGER NOT NULL,
+    token_budget INTEGER NOT NULL,
+    selected_memory_ids TEXT NOT NULL,
+    generation_method TEXT NOT NULL,
+    configuration_version TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS compaction_memory_extractions (
+    compaction_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    status TEXT NOT NULL,
+    result_json TEXT NOT NULL DEFAULT '{}',
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS initial_context_snapshot_diagnostics (
+    session_id TEXT PRIMARY KEY REFERENCES initial_context_snapshots(session_id) ON DELETE CASCADE,
+    token_count_method TEXT NOT NULL,
+    selected_memory_count INTEGER NOT NULL,
+    truncated INTEGER NOT NULL,
+    budget_respected INTEGER NOT NULL,
+    generation_elapsed_ms REAL NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES sessions(id),

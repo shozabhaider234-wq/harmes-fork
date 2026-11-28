@@ -39,7 +39,7 @@ Scoped vector / keyword / hybrid retrieval -> ranked records + provenance
        v
 A2 ContextBuilder -> temporary, token-budgeted context package -> Hermes caller
 
-A2 Prime-inspired provider -> separately validated/versioned learning artifacts
+A2 Prime-inspired API -> callback task harness + separately validated/versioned artifacts
 Team B AVO-inspired provider -> independent learning implementation
 ```
 
@@ -237,7 +237,8 @@ memd/
   crates/memd/src/lib.rs, main.rs     existing IPC + SQLite runtime adapter
   clients/python/memory_client.py    backward-compatible v1 client extensions
   clients/python/context_builder.py existing Python selection and packaging with optional detail budgets, rank-aware utility cutoff, and explicit supersession handling
-  clients/python/prime_learning.py  existing A2 artifact prototype, unchanged
+  clients/python/prime_learning.py  versioned procedural artifact store and evaluator
+  clients/python/task_harness.py   provider-neutral callback execution + experience capture
   tests/test_persistent_client.py    real-daemon Python/client/transport tests
   scripts/measure.py                existing IPC/RSS tool, preserved
   scripts/benchmark_storage.py      synthetic storage/latency/RSS benchmark
@@ -259,7 +260,7 @@ with no Hermes, Prime, context builder or AVO provider.
 | Persistent-storage stage | Implemented: SQLite migrations, semantic/episodic ingestion, vec0, FTS5, hybrid ranking, metadata/scope/expiry filtering, updates/deletes, dedup, source lookup, persistence |
 | Storage verification | Passing standalone deterministic Rust tests and real-daemon Python tests; see validation/benchmark receipt in `memd/VALIDATION.md` |
 | Context formation | Existing A2 builder reused by the opt-in MemoryProvider; real plugin discovery and MemoryManager tool-result dispatch pass integration tests without prompt mutation |
-| Prime learning | Existing separate artifact prototype unchanged; no Prime learning algorithm added or certified here |
+| Prime learning | Deterministic experience/artifact store and callback harness implemented; Hermes config, automatic turn capture, real reviewer/evaluator execution, and prompt activation remain incomplete; see `PRIME_LEARNING.md` |
 | Hermes extraction/integration | Opt-in native background review through Rust persistence; native cadence, full same-model history and existing routed digest preserved; explicit remember/recall/source/history share storage |
 | Production/platform proof | Windows GNU tests pass; real ONNX inference and named pipes/current-user ACL implemented and tested; native MSVC and Unix validation still require their respective hosts |
 | Evaluation stage | Synthetic capacity/latency/RSS tooling implemented; real semantic-quality evaluation and larger/production-platform scale claims remain planned |

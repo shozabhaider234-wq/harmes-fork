@@ -30,7 +30,13 @@ The cached system prompt is assembled as three ordered tiers (see `agent/system_
 
 1. **stable** — identity (`SOUL.md` or fallback), tool/model guidance, coding operating brief
 2. **context** — caller-supplied `system_message`, project context files (`.hermes.md` / `AGENTS.md` / `CLAUDE.md` / `.cursorrules`), then the worktree-dependent git workspace snapshot, operator instructions and platform hints
-3. **volatile** — skills index, built-in memory snapshot (`MEMORY.md`), user profile snapshot (`USER.md`), external memory-provider block, timestamp/session/model/provider line, then runtime environment hints (host / home / **current working directory**)
+3. **volatile** — skills index, legacy built-in memory/profile snapshots and external memory-provider block when configured, timestamp/session/model/provider line, then runtime environment hints (host / home / **current working directory**)
+
+When `memory.compact_initial_context.enabled` is true and `hermes-memd` is active, the Rust-backed compact initial context replaces the built-in `MEMORY.md` and `USER.md` prompt snapshots and is appended to the stable tier. Its persisted bytes are fixed for a session id. In-place compaction retains the snapshot; a compression that publishes a child session creates a new one. Explicit `memd_memory` retrieval stays in the dynamic tool-result path.
+
+The child prompt is built only after compression has completed and the parent transcript has been passed through `commit_memory_session`. With `extract_on_compaction` enabled, the Rust provider then stores eligible, explicitly labeled user statements before the child snapshot is selected. This deterministic extractor uses no extra model call. It ignores assistant/tool output, bounds transcript scanning to 12,000 characters and eight candidates, rejects sensitive or threat-pattern content, skips exact duplicates, and stores related conflicting claims as separate entries with source-session and compaction provenance. Extraction status is persisted by parent lineage; retrying a recorded compaction reuses its complete or incomplete receipt rather than repeating writes. Failure is observable and non-fatal: the compact summary and already durable memories remain available, and the child receives a context from existing Rust records.
+
+Each new snapshot stores its token budget, selected memory IDs, generation version, hash, count method, selected count, truncation flag, budget check, and generation duration. The count covers the complete serialized block including its safety header. Hermes uses a supplied active tokenizer when available; otherwise the count is a padded local estimate and must not be described as provider-measured usage. A reusable stable prefix helps providers that support prefix caching, but cache hits are determined by provider-reported usage and are not guaranteed by system-prompt stability alone.
 
 The final system prompt is then joined as: `stable` → `context` → `volatile`.
 
